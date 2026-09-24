@@ -24,7 +24,7 @@
 
   <artifactId>jms-client-dist</artifactId>
   <packaging>pom</packaging>
-  <name>Apache Qpid JMS</name>
+  <name>RabbitMQ AMQP JMS Distribution</name>
 
   <dependencies>
     <dependency>

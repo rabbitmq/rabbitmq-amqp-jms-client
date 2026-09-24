@@ -24,8 +24,8 @@
   </parent>
 
   <artifactId>jms-client-examples</artifactId>
-  <name>QpidJMS Examples</name>
-  <description>Examples for QpidJMS</description>
+  <name>RabbitMQ AMQP JMS Examples</name>
+  <description>Examples for the RabbitMQ AMQP JMS client</description>
   <packaging>jar</packaging>
 
   <properties>

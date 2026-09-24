@@ -128,7 +128,7 @@ public class JmsConnection implements AutoCloseable, Connection, TopicConnection
         // not have it's own mechanism for doing so if the configuration specifies that the
         // Connection create this thread as a non-daemon thread.
         executor = new ThreadPoolExecutor(1, 1, 5, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(),
-            new QpidJMSThreadFactory("QpidJMS Connection Executor: " + connectionInfo.getId(), connectionInfo.isUseDaemonThread()));
+            new QpidJMSThreadFactory("RabbitMQ AMQP JMS Connection Executor: " + connectionInfo.getId(), connectionInfo.isUseDaemonThread()));
 
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardOldestPolicy());
 

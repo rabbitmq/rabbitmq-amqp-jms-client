@@ -24,7 +24,7 @@
   </parent>
 
   <artifactId>jms-client-activemq-tests</artifactId>
-  <name>QpidJMS ActiveMQ Interop Tests</name>
+  <name>RabbitMQ AMQP JMS ActiveMQ Interop Tests</name>
   <description>Tests the JMS client against the ActiveMQ Broker.</description>
   <packaging>jar</packaging>
   <properties>

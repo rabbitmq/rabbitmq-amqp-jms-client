@@ -24,3 +24,6 @@ target
 .cproject
 eclipse-classes
 # End of Eclipse IDE files
+
+# Maven flatten plugin
+.flattened-pom.xml

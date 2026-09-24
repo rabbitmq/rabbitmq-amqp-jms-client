@@ -25,7 +25,7 @@
 
   <artifactId>jms-client</artifactId>
   <packaging>jar</packaging>
-  <name>QpidJMS Client</name>
+  <name>RabbitMQ AMQP JMS Client</name>
   <description>The core JMS Client implementation</description>
 
   <dependencies>
@@ -167,6 +167,7 @@
         <configuration>
           <instructions>
             <Bundle-SymbolicName>com.rabbitmq.client.jms</Bundle-SymbolicName>
+            <Automatic-Module-Name>com.rabbitmq.client.jms</Automatic-Module-Name>
             <Export-Package>com.rabbitmq.client.jms.*</Export-Package>
             <Import-Package>
             io.opentracing.*;resolution:="optional",

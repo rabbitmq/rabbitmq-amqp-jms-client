@@ -24,8 +24,8 @@
   </parent>
 
   <artifactId>jms-client-discovery</artifactId>
-  <name>QpidJMS Discovery Library</name>
-  <description>The Broker Discovery module for QpidJMS</description>
+  <name>RabbitMQ AMQP JMS Discovery Library</name>
+  <description>The Broker Discovery module for the RabbitMQ AMQP JMS client</description>
   <packaging>jar</packaging>
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -58,5 +58,21 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Automatic-Module-Name>com.rabbitmq.client.jms.discovery</Automatic-Module-Name>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
 
 </project>
