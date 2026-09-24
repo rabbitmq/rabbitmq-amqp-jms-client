@@ -73,6 +73,21 @@ After building the modules, src and binary distribution assemblies can be found 
 
     jms-client-dist/target
 
+## Publishing
+
+The parent POM, `jms-client`, and `jms-client-discovery` are published to Maven Central
+(Central Portal, deployments must be published manually from the portal).
+The other modules are not published.
+
+* Snapshots: run the "Publish snapshot" GitHub Actions workflow.
+* Releases: update [`release-versions.txt`](release-versions.txt), then run the
+  "Release RabbitMQ AMQP JMS Client" workflow. [`ci/release.sh`](ci/release.sh)
+  sets the `revision` property to the release version, tags (`v<version>`), deploys,
+  and sets the next development version.
+
+Release tags use a `v` prefix, upstream Apache Qpid JMS tags do not.
+Do not push upstream tags to this repository (e.g. with `git push --tags`).
+
 ## Synchronization with upstream
 
 Changes from Apache Qpid JMS are brought in with a dedicated branch:

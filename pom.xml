@@ -123,6 +123,13 @@
     <maven-surefire-plugin-version>3.5.4</maven-surefire-plugin-version>
     <apache-rat-plugin-version>0.16.1</apache-rat-plugin-version>
     <flatten-maven-plugin-version>1.8.0</flatten-maven-plugin-version>
+    <maven-gpg-plugin-version>3.2.8</maven-gpg-plugin-version>
+    <central-publishing-maven-plugin-version>0.11.0</central-publishing-maven-plugin-version>
+
+    <!-- Publishing, javadoc and signing are enabled in the snapshots/milestone/release profiles -->
+    <maven.javadoc.skip>true</maven.javadoc.skip>
+    <gpg.skip>true</gpg.skip>
+    <gpg.keyname>6026DFCA</gpg.keyname>
   </properties>
 
   <issueManagement>
@@ -447,6 +454,11 @@
           <artifactId>flatten-maven-plugin</artifactId>
           <version>${flatten-maven-plugin-version}</version>
         </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-gpg-plugin</artifactId>
+          <version>${maven-gpg-plugin-version}</version>
+        </plugin>
       </plugins>
     </pluginManagement>
     <plugins>
@@ -579,6 +591,69 @@
           </execution>
         </executions>
       </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <configuration>
+          <quiet>true</quiet>
+          <additionalOptions>-Xdoclint:none</additionalOptions>
+        </configuration>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals>
+              <goal>jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals>
+              <goal>jar-no-fork</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>${central-publishing-maven-plugin-version}</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+          <autoPublish>false</autoPublish>
+          <!-- Published: parent POM, client, discovery -->
+          <excludeArtifacts>
+            <excludeArtifact>jms-client-interop-tests</excludeArtifact>
+            <excludeArtifact>jms-client-activemq-tests</excludeArtifact>
+            <excludeArtifact>jms-client-examples</excludeArtifact>
+            <excludeArtifact>jms-client-docs</excludeArtifact>
+            <excludeArtifact>jms-client-dist</excludeArtifact>
+          </excludeArtifacts>
+        </configuration>
+      </plugin>
+      <!-- must stay at the end to execute last -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-gpg-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>sign-artifacts</id>
+            <phase>package</phase>
+            <goals>
+              <goal>sign</goal>
+            </goals>
+            <configuration>
+              <keyname>${gpg.keyname}</keyname>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 
@@ -591,4 +666,28 @@
       </plugin>
     </plugins>
   </reporting>
+
+  <profiles>
+    <profile>
+      <id>snapshots</id>
+      <properties>
+        <maven.javadoc.skip>false</maven.javadoc.skip>
+        <gpg.skip>false</gpg.skip>
+      </properties>
+    </profile>
+    <profile>
+      <id>milestone</id>
+      <properties>
+        <maven.javadoc.skip>false</maven.javadoc.skip>
+        <gpg.skip>false</gpg.skip>
+      </properties>
+    </profile>
+    <profile>
+      <id>release</id>
+      <properties>
+        <maven.javadoc.skip>false</maven.javadoc.skip>
+        <gpg.skip>false</gpg.skip>
+      </properties>
+    </profile>
+  </profiles>
 </project>
