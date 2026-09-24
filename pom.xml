@@ -100,7 +100,7 @@
     <netty-transport-native-kqueue-classifier>osx-x86_64</netty-transport-native-kqueue-classifier>
 
     <!-- Project version, CI-friendly (resolved in published POMs by the flatten plugin) -->
-    <revision>2.12.0-SNAPSHOT</revision>
+    <revision>1.18.0-SNAPSHOT</revision>
 
     <!-- Build settings -->
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
