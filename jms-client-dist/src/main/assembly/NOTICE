@@ -1,3 +1,10 @@
+RabbitMQ AMQP JMS
+Copyright (c) 2026 Broadcom. All Rights Reserved.
+The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+
+This product is based on Apache Qpid JMS (https://github.com/apache/qpid-jms),
+whose original NOTICE follows.
+
 Apache Qpid JMS
 Copyright 2013-2026 The Apache Software Foundation
 

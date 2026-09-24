@@ -29,7 +29,7 @@ import org.slf4j.LoggerFactory;
 public class MetaDataSupport {
     private static final Logger LOG = LoggerFactory.getLogger(MetaDataSupport.class);
 
-    public static final String PROVIDER_NAME = "QpidJMS";
+    public static final String PROVIDER_NAME = "RabbitMQ AMQP JMS";
     public static final String PROVIDER_VERSION;
     public static final int PROVIDER_MAJOR_VERSION;
     public static final int PROVIDER_MINOR_VERSION;

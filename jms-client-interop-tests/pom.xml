@@ -24,7 +24,7 @@
   </parent>
 
   <artifactId>jms-client-interop-tests</artifactId>
-  <name>QpidJMS Broker Interop Tests</name>
+  <name>RabbitMQ AMQP JMS Broker Interop Tests</name>
   <description>A set of modules meant for testing interoperability between the client and various AMQP Brokers.</description>
   <packaging>pom</packaging>
   <properties>
