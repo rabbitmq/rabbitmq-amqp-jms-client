@@ -22,9 +22,9 @@
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>org.apache.qpid</groupId>
-  <artifactId>qpid-jms-parent</artifactId>
-  <version>1.17.0</version>
+  <groupId>com.rabbitmq.client</groupId>
+  <artifactId>jms-client-parent</artifactId>
+  <version>${revision}</version>
   <packaging>pom</packaging>
   <name>QpidJMS</name>
   <inceptionYear>2013</inceptionYear>
@@ -92,29 +92,29 @@
     <connection>scm:git:https://gitbox.apache.org/repos/asf/qpid-jms.git</connection>
     <developerConnection>scm:git:https://gitbox.apache.org/repos/asf/qpid-jms.git</developerConnection>
     <url>https://gitbox.apache.org/repos/asf?p=qpid-jms.git</url>
-    <tag>1.17.0</tag>
+    <tag>HEAD</tag>
   </scm>
 
   <modules>
-    <module>qpid-jms-client</module>
-    <module>qpid-jms-discovery</module>
-    <module>qpid-jms-interop-tests</module>
-    <module>qpid-jms-examples</module>
-    <module>qpid-jms-docs</module>
-    <module>apache-qpid-jms</module>
+    <module>jms-client</module>
+    <module>jms-client-discovery</module>
+    <module>jms-client-interop-tests</module>
+    <module>jms-client-examples</module>
+    <module>jms-client-docs</module>
+    <module>jms-client-dist</module>
   </modules>
 
   <dependencyManagement>
     <dependencies>
       <!-- Internal module dependencies -->
       <dependency>
-        <groupId>org.apache.qpid</groupId>
-        <artifactId>qpid-jms-client</artifactId>
+        <groupId>com.rabbitmq.client</groupId>
+        <artifactId>jms-client</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
-        <groupId>org.apache.qpid</groupId>
-        <artifactId>qpid-jms-discovery</artifactId>
+        <groupId>com.rabbitmq.client</groupId>
+        <artifactId>jms-client-discovery</artifactId>
         <version>${project.version}</version>
       </dependency>
       <!-- Required dependencies -->

@@ -31,16 +31,16 @@ Execute the tests and produce code coverage report:
 
 First build and install all the modules as detailed above (if running against
 a source checkout/release, rather than against released binaries) and then
-consult the README in the qpid-jms-examples module itself.
+consult the README in the jms-client-examples module itself.
 
 ## Documentation
 
-Documentation source can be found in the qpid-jms-docs module, with a published
+Documentation source can be found in the jms-client-docs module, with a published
 version available on the [website](https://qpid.apache.org/components/jms/).
 
 ## Distribution assemblies
 
 After building the modules, src and binary distribution assemblies can be found at:
 
-    apache-qpid-jms/target
+    jms-client-dist/target
 

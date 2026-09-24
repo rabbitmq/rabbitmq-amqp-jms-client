@@ -1,0 +1,413 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.rabbitmq.client.jms.transports.netty;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+
+import com.rabbitmq.client.jms.test.Wait;
+import com.rabbitmq.client.jms.test.proxy.TestProxy;
+import com.rabbitmq.client.jms.transports.Transport;
+import com.rabbitmq.client.jms.transports.TransportListener;
+import com.rabbitmq.client.jms.transports.TransportOptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import io.netty.handler.proxy.HttpProxyHandler;
+import io.netty.handler.proxy.ProxyHandler;
+import io.netty.handler.proxy.Socks5ProxyHandler;
+
+/**
+ * Test basic functionality of the Netty based TCP Transport ruuing in secure mode (SSL).
+ */
+public class NettySslTransportTest extends NettyTcpTransportTest {
+
+    private static final Logger LOG = LoggerFactory.getLogger(NettySslTransportTest.class);
+
+    public static final String PASSWORD = "password";
+    public static final String SERVER_KEYSTORE = "src/test/resources/broker-pkcs12.keystore";
+    public static final String SERVER_TRUSTSTORE = "src/test/resources/broker-pkcs12.truststore";
+    public static final String SERVER_WRONG_HOST_KEYSTORE = "src/test/resources/broker-wrong-host-pkcs12.keystore";
+    public static final String CLIENT_KEYSTORE = "src/test/resources/client-jks.keystore";
+    public static final String CLIENT_MULTI_KEYSTORE = "src/test/resources/client-multiple-keys-jks.keystore";
+    public static final String CLIENT_TRUSTSTORE = "src/test/resources/client-jks.truststore";
+    public static final String OTHER_CA_TRUSTSTORE = "src/test/resources/other-ca-jks.truststore";
+
+    public static final String CLIENT_KEY_ALIAS = "client";
+    public static final String CLIENT_DN = "O=Client,CN=client";
+    public static final String CLIENT2_KEY_ALIAS = "client2";
+    public static final String CLIENT2_DN = "O=Client2,CN=client2";
+
+    public static final String KEYSTORE_TYPE = "jks";
+
+    @Override
+    @Test
+    @Timeout(60)
+    public void testCreateWithNullOptionsThrowsIAE() throws Exception {
+        URI serverLocation = new URI("tcp://localhost:5762");
+
+        try {
+            createTransport(serverLocation, testListener, null);
+            fail("Should have thrown IllegalArgumentException");
+        } catch (IllegalArgumentException iae) {
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectToServerWithoutTrustStoreFails() throws Exception {
+        try (NettyEchoServer server = createEchoServer(createServerOptions())) {
+            server.start();
+
+            int port = server.getServerPort();
+            URI serverLocation = new URI("tcp://localhost:" + port);
+
+            Transport transport = createTransport(serverLocation, testListener, createClientOptionsWithoutTrustStore(false));
+            try {
+                transport.connect(null, null);
+                fail("Should not have connected to the server: " + serverLocation);
+            } catch (Exception e) {
+                LOG.info("Connection failed to untrusted test server: {}", serverLocation);
+            }
+
+            assertFalse(transport.isConnected());
+
+            transport.close();
+        }
+
+        logTransportErrors();
+
+        assertTrue(exceptions.isEmpty());
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectToServerUsingUntrustedKeyFails() throws Exception {
+        try (NettyEchoServer server = createEchoServer(createServerOptions())) {
+            server.start();
+
+            int port = server.getServerPort();
+            URI serverLocation = new URI("tcp://localhost:" + port);
+
+            TransportOptions options = new TransportOptions();
+
+            options.setTrustStoreLocation(OTHER_CA_TRUSTSTORE);
+            options.setTrustStorePassword(PASSWORD);
+
+            Transport transport = createTransport(serverLocation, testListener, options);
+            try {
+                transport.connect(null, null);
+                fail("Should not have connected to the server: " + serverLocation);
+            } catch (Exception e) {
+                LOG.info("Connection failed to untrusted test server: {}", serverLocation);
+            }
+
+            assertFalse(transport.isConnected());
+
+            transport.close();
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectToServerClientTrustsAll() throws Exception {
+        try (NettyEchoServer server = createEchoServer(createServerOptions())) {
+            server.start();
+
+            int port = server.getServerPort();
+            URI serverLocation = new URI("tcp://localhost:" + port);
+
+            Transport transport = createTransport(serverLocation, testListener, createClientOptionsWithoutTrustStore(true));
+            try {
+                transport.connect(null, null);
+                LOG.info("Connection established to untrusted test server: {}", serverLocation);
+            } catch (Exception e) {
+                fail("Should have connected to the server at " + serverLocation + " but got exception: " + e);
+            }
+
+            assertTrue(transport.isConnected());
+            assertTrue(transport.isSecure());
+
+            transport.close();
+        }
+
+        logTransportErrors();
+        assertTrue(exceptions.isEmpty());
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectWithNeedClientAuth() throws Exception {
+        TransportOptions serverOptions = createServerOptions();
+
+        try (NettyEchoServer server = createEchoServer(serverOptions, true)) {
+            server.start();
+
+            int port = server.getServerPort();
+            URI serverLocation = new URI("tcp://localhost:" + port);
+
+            TransportOptions clientOptions = createClientOptions();
+
+            NettyTcpTransport transport = createTransport(serverLocation, testListener, clientOptions);
+            try {
+                transport.connect(null, null);
+                LOG.info("Connection established to test server: {}", serverLocation);
+            } catch (Exception e) {
+                fail("Should have connected to the server at " + serverLocation + " but got exception: " + e);
+            }
+
+            assertTrue(transport.isConnected());
+            assertTrue(transport.isSecure());
+
+            // Verify there was a certificate sent to the server
+            assertTrue(server.getSslHandler().handshakeFuture().await(2, TimeUnit.SECONDS), "Server handshake did not complete in alotted time");
+            assertNotNull(server.getSslHandler().engine().getSession().getPeerCertificates());
+
+            transport.close();
+        }
+
+        logTransportErrors();
+        assertTrue(exceptions.isEmpty());
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectWithSpecificClientAuthKeyAlias() throws Exception {
+        doClientAuthAliasTestImpl(CLIENT_KEY_ALIAS, CLIENT_DN);
+        doClientAuthAliasTestImpl(CLIENT2_KEY_ALIAS, CLIENT2_DN);
+    }
+
+    private void doClientAuthAliasTestImpl(String alias, String expectedDN) throws Exception, URISyntaxException, IOException, InterruptedException {
+        TransportOptions serverOptions = createServerOptions();
+
+        try (NettyEchoServer server = createEchoServer(serverOptions, true)) {
+            server.start();
+
+            int port = server.getServerPort();
+            URI serverLocation = new URI("tcp://localhost:" + port);
+
+            TransportOptions clientOptions = createClientOptions();
+            clientOptions.setKeyStoreLocation(CLIENT_MULTI_KEYSTORE);
+            clientOptions.setKeyAlias(alias);
+
+            NettyTcpTransport transport = createTransport(serverLocation, testListener, clientOptions);
+            try {
+                transport.connect(null, null);
+                LOG.info("Connection established to test server: {}", serverLocation);
+            } catch (Exception e) {
+                fail("Should have connected to the server at " + serverLocation + " but got exception: " + e);
+            }
+
+            assertTrue(transport.isConnected());
+            assertTrue(transport.isSecure());
+
+            assertTrue(server.getSslHandler().handshakeFuture().await(2, TimeUnit.SECONDS), "Server handshake did not complete in alotted time");
+
+            Certificate[] peerCertificates = server.getSslHandler().engine().getSession().getPeerCertificates();
+            assertNotNull(peerCertificates);
+
+            Certificate cert = peerCertificates[0];
+            assertTrue(cert instanceof X509Certificate);
+            String dn = ((X509Certificate)cert).getSubjectX500Principal().getName();
+            assertEquals(expectedDN, dn, "Unexpected certificate DN");
+
+            transport.close();
+        }
+
+        logTransportErrors();
+        assertTrue(exceptions.isEmpty());
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectToServerVerifyHost() throws Exception {
+        doConnectToServerVerifyHostTestImpl(true, null);
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectToServerNoVerifyHost() throws Exception {
+        doConnectToServerVerifyHostTestImpl(false, null);
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectViaSocksProxyToServerVerifyHost() throws Exception {
+        doConnectToServerVerifyHostTestImpl(true, TestProxy.ProxyType.SOCKS5);
+    }
+
+    @Test
+    @Timeout(60)
+    public void testConnectViaSocksProxyToServerNoVerifyHost() throws Exception {
+        doConnectToServerVerifyHostTestImpl(false, TestProxy.ProxyType.SOCKS5);
+    }
+
+    protected void doConnectToServerVerifyHostTestImpl(boolean verifyHost, TestProxy.ProxyType proxyType) throws Exception {
+        TransportOptions serverOptions = createServerOptions();
+        serverOptions.setKeyStoreLocation(SERVER_WRONG_HOST_KEYSTORE);
+
+        TestProxy testProxy = null;
+        try (NettyEchoServer server = createEchoServer(serverOptions)) {
+            if (proxyType != null) {
+                testProxy = new TestProxy(proxyType);
+                testProxy.start();
+            }
+            server.start();
+
+            int port = server.getServerPort();
+            URI serverLocation = new URI("tcp://localhost:" + port);
+
+            TransportOptions clientOptions = createClientOptionsIsVerify(verifyHost);
+
+            if (proxyType != null) {
+                configureProxyHandlerSupplier(proxyType, testProxy, clientOptions);
+            }
+
+            if (verifyHost) {
+                assertTrue(clientOptions.isVerifyHost(), "Expected verifyHost to be true");
+            } else {
+                assertFalse(clientOptions.isVerifyHost(), "Expected verifyHost to be false");
+            }
+
+            Transport transport = createTransport(serverLocation, testListener, clientOptions);
+            try {
+                transport.connect(null, null);
+                if (verifyHost) {
+                    fail("Should not have connected to the server: " + serverLocation);
+                }
+            } catch (Exception e) {
+                if (verifyHost) {
+                    LOG.info("Connection failed to test server: {} as expected.", serverLocation);
+                } else {
+                    LOG.error("Failed to connect to test server: " + serverLocation, e);
+                    fail("Should have connected to the server at " + serverLocation + " but got exception: " + e);
+                }
+            }
+
+            if (verifyHost) {
+                assertFalse(transport.isConnected());
+            } else {
+                assertTrue(transport.isConnected());
+            }
+
+            transport.close();
+
+            if (proxyType != null) {
+                assertEquals(1, testProxy.getSuccessCount());
+            }
+            assertTrue(Wait.waitFor(new Wait.Condition() {
+                @Override
+                public boolean isSatisfied() throws Exception {
+                    return server.getChannelActiveCount() == 1;
+                }
+            }, 10_000, 10));
+        } finally {
+            if (testProxy != null) {
+                testProxy.close();
+            }
+        }
+    }
+
+    protected void configureProxyHandlerSupplier(TestProxy.ProxyType proxyType, TestProxy testProxy, TransportOptions clientOptions) {
+        if (proxyType == TestProxy.ProxyType.SOCKS5) {
+            SocketAddress proxyAddress = new InetSocketAddress("localhost", testProxy.getPort());
+            Supplier<ProxyHandler> proxyHandlerFactory = () -> {
+                return new Socks5ProxyHandler(proxyAddress);
+            };
+            clientOptions.setProxyHandlerSupplier(proxyHandlerFactory);
+        } else if (proxyType == TestProxy.ProxyType.HTTP) {
+            SocketAddress proxyAddress = new InetSocketAddress("localhost", testProxy.getPort());
+            Supplier<ProxyHandler> proxyHandlerFactory = () -> {
+                return new HttpProxyHandler(proxyAddress);
+            };
+            clientOptions.setProxyHandlerSupplier(proxyHandlerFactory);
+        } else {
+            throw new IllegalArgumentException("Unknown proxy type:" + proxyType);
+        }
+    }
+
+    @Override
+    protected NettyTcpTransport createTransport(URI serverLocation, TransportListener listener, TransportOptions options) {
+        return new NettyTcpTransport(listener, serverLocation, options, true);
+    }
+
+    @Override
+    protected NettyEchoServer createEchoServer(TransportOptions options) {
+        return createEchoServer(options, false);
+    }
+
+    @Override
+    protected NettyEchoServer createEchoServer(TransportOptions options, boolean needClientAuth) {
+        return new NettyEchoServer(options, true, needClientAuth);
+    }
+
+    @Override
+    protected TransportOptions createClientOptions() {
+        return createClientOptionsIsVerify(false);
+    }
+
+    protected TransportOptions createClientOptionsIsVerify(boolean verifyHost) {
+        TransportOptions options = new TransportOptions();
+
+        options.setKeyStoreLocation(CLIENT_KEYSTORE);
+        options.setKeyStorePassword(PASSWORD);
+        options.setTrustStoreLocation(CLIENT_TRUSTSTORE);
+        options.setTrustStorePassword(PASSWORD);
+        options.setStoreType(KEYSTORE_TYPE);
+        options.setVerifyHost(verifyHost);
+
+        return options;
+    }
+
+    @Override
+    protected TransportOptions createServerOptions() {
+        TransportOptions options = new TransportOptions();
+
+        // Run the server in JDK mode for now to validate cross compatibility
+        options.setKeyStoreLocation(SERVER_KEYSTORE);
+        options.setKeyStorePassword(PASSWORD);
+        options.setTrustStoreLocation(SERVER_TRUSTSTORE);
+        options.setTrustStorePassword(PASSWORD);
+        options.setVerifyHost(false);
+
+        return options;
+    }
+
+    protected TransportOptions createClientOptionsWithoutTrustStore(boolean trustAll) {
+        TransportOptions options = new TransportOptions();
+
+        options.setStoreType(KEYSTORE_TYPE);
+        options.setTrustAll(trustAll);
+
+        return options;
+    }
+}
