@@ -101,3 +101,5 @@ Changes from Apache Qpid JMS are brought in with a dedicated branch:
 
 The `1.x` branch follows the same process with the `upstream-renamed-1.x` branch.
 Never merge upstream branches directly.
+
+See [FORK.md](FORK.md) for details.
