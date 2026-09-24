@@ -10,8 +10,9 @@
 #   <renamed-branch>  defaults to upstream-renamed (for main),
 #                     use upstream-renamed-1.x for the 1.x line
 #
-# If <renamed-branch> does not exist, it is created from <upstream-ref>
-# (initial fork of a line).
+# The local <renamed-branch> is first aligned with origin/<renamed-branch>.
+# If <renamed-branch> exists neither locally nor on origin, it is created
+# from <upstream-ref> (initial fork of a line).
 # Expects the "upstream" remote to point to https://github.com/apache/qpid-jms.git
 # Neither merges nor pushes anything.
 
@@ -31,6 +32,19 @@ cp "$REPO/scripts/rename.sh" "$TMP/rename.sh"
 
 git fetch upstream --tags
 SHA=$(git rev-parse --verify "$REF^{commit}")
+
+# Start from the shared state of the branch (e.g. fresh clone, other maintainer synced)
+git fetch origin
+if git rev-parse --verify -q "refs/remotes/origin/$BRANCH" > /dev/null; then
+  if ! git rev-parse --verify -q "refs/heads/$BRANCH" > /dev/null; then
+    git branch --track "$BRANCH" "origin/$BRANCH"
+  elif git merge-base --is-ancestor "$BRANCH" "origin/$BRANCH"; then
+    git branch -f "$BRANCH" "origin/$BRANCH"
+  elif ! git merge-base --is-ancestor "origin/$BRANCH" "$BRANCH"; then
+    echo "error: $BRANCH and origin/$BRANCH have diverged, fix this first" >&2
+    exit 1
+  fi
+fi
 
 if git rev-parse --verify -q "refs/heads/$BRANCH" > /dev/null; then
   LAST=$(git log -1 --format='%(trailers:key=Upstream-Commit,valueonly)' "$BRANCH" | tr -d '[:space:]')
