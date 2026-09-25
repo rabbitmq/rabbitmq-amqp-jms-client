@@ -101,6 +101,26 @@ Adds a commit to `upstream-renamed` (default) or `upstream-renamed-1.x`:
 It does nothing if the ref is already synced. It does not merge nor push.
 It uses the `rename.sh` of your current checkout.
 
+## When to sync
+
+Upstream releases every few months, with small releases (a few to 20 commits),
+`main` and `1.x` lines the same day.
+
+* **Default: sync each upstream release** (tags, e.g. `2.12.0` and `1.18.0`).
+  Released code only, and sync commits map to upstream versions.
+* **Sync earlier when a change is needed now** (security fix, user-facing bug, CVE upgrade
+  merged but not released): sync to `upstream/main` or to a commit SHA.
+  The next release sync brings the rest.
+* **Before each of our releases**, check what upstream merged since the last sync:
+  `git log --oneline <last-synced-sha>..upstream/main`
+  (last synced SHA: `git log -1 --format='%(trailers:key=Upstream-Commit,valueonly)' upstream-renamed`).
+* Do not skip upstream releases: merges get bigger and harder to review.
+* Never cherry-pick upstream commits: they are not renamed, and the next sync
+  brings them again. Sync to the commit instead.
+
+To be notified, watch upstream releases on GitHub (Watch → Custom → Releases)
+and check upstream tags regularly (`git fetch upstream --tags`).
+
 ## Merging changes from upstream
 
 ### One-time setup (fresh clone)
