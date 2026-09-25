@@ -12,6 +12,10 @@ which uses AMQP 0-9-1.
 
 ## Maven coordinates
 
+### Stable Release
+
+NB: no stable release yet
+
 ```xml
 <dependency>
   <groupId>com.rabbitmq.client</groupId>
@@ -22,6 +26,29 @@ which uses AMQP 0-9-1.
 
 The root package is `com.rabbitmq.client.jms`. Classes keep their upstream names,
 e.g. the JNDI initial context factory is `com.rabbitmq.client.jms.jndi.JmsInitialContextFactory`.
+
+### Snapshots
+
+```xml
+<dependency>
+  <groupId>com.rabbitmq.client</groupId>
+  <artifactId>jms-client</artifactId>
+  <version>2.12.0-SNAPSHOT</version>
+</dependency>
+```
+
+Add the [snapshot repository](https://central.sonatype.com/repository/maven-snapshots/) to your dependency manager:
+
+```xml
+<repositories>
+  <repository>
+    <id>central-portal-snapshots</id>
+    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+    <snapshots><enabled>true</enabled></snapshots>
+    <releases><enabled>false</enabled></releases>
+  </repository>
+</repositories>
+```
 
 ## Differences with Apache Qpid JMS
 
