@@ -33,7 +33,7 @@ e.g. the JNDI initial context factory is `com.rabbitmq.client.jms.jndi.JmsInitia
 <dependency>
   <groupId>com.rabbitmq.client</groupId>
   <artifactId>jms-client</artifactId>
-  <version>2.12.0-SNAPSHOT</version>
+  <version>1.18.0-SNAPSHOT</version>
 </dependency>
 ```
 
