@@ -42,6 +42,8 @@ import java.util.UUID;
 import javax.jms.JMSException;
 import javax.jms.MessageFormatException;
 import javax.jms.Topic;
+import com.rabbitmq.client.jms.message.JmsMessage;
+import io.netty.buffer.ByteBuf;
 
 import com.rabbitmq.client.jms.JmsDestination;
 import com.rabbitmq.client.jms.JmsQueue;
@@ -63,6 +65,7 @@ import org.apache.qpid.proton.amqp.messaging.Footer;
 import org.apache.qpid.proton.amqp.messaging.Header;
 import org.apache.qpid.proton.amqp.messaging.MessageAnnotations;
 import org.apache.qpid.proton.amqp.messaging.Properties;
+import org.apache.qpid.proton.amqp.messaging.Section;
 import org.apache.qpid.proton.codec.Data;
 import org.apache.qpid.proton.message.Message;
 import org.junit.jupiter.api.Test;
@@ -2278,6 +2281,38 @@ public class AmqpJmsMessageFacadeTest extends AmqpJmsMessageTypesTestCase  {
         assertFalse(amqpMessageFacade.hasBody());
         amqpMessageFacade.setBody(new AmqpValue("test"));
         assertTrue(amqpMessageFacade.hasBody());
+    }
+
+    @Test
+    public void testEncodeMessageWithNoBodyWritesAmqpValueNullBodySection() throws Exception {
+        AmqpJmsMessageFacade amqpMessageFacade = createNewMessageFacade();
+        assertFalse(amqpMessageFacade.hasBody());
+
+        ByteBuf encoded = amqpMessageFacade.encodeMessage();
+        byte[] bytes = new byte[encoded.readableBytes()];
+        encoded.readBytes(bytes);
+
+        Message protonMessage = Message.Factory.create();
+        protonMessage.decode(bytes, 0, bytes.length);
+
+        // AMQP requires a body section on every message, and the JMS mapping encodes a JMS
+        // Message that has no body as a single amqp-value section containing null.
+        Section body = protonMessage.getBody();
+        assertTrue(body instanceof AmqpValue, "Expected an amqp-value body section but got: " + body);
+        assertNull(((AmqpValue) body).getValue());
+    }
+
+    @Test
+    public void testMessageWithNoBodyRoundTripsAsGenericMessage() throws Exception {
+        AmqpJmsMessageFacade amqpMessageFacade = createNewMessageFacade();
+
+        AmqpJmsMessageFacade decoded = AmqpCodec.decodeMessage(
+            createMockAmqpConsumer(), new AmqpReadableBuffer(amqpMessageFacade.encodeMessage()));
+
+        // The x-opt-jms-msg-type annotation has to keep this a generic Message: an amqp-value
+        // section containing null would otherwise be read back as a TextMessage.
+        assertEquals(JmsMessageFacade.JMS_MESSAGE, decoded.getJmsMsgType());
+        assertEquals(JmsMessage.class, decoded.asJmsMessage().getClass());
     }
 
     @Test
