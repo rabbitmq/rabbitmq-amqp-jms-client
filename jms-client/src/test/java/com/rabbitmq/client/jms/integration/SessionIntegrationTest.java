@@ -2263,13 +2263,13 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             testPeer.waitForAllHandlersToComplete(3000);
 
             for (int i = 1; i <= messageCount; i++) {
-                // Then expect an *settled* TransactionalState disposition for each message once received by the consumer
+                // Then expect an *unsettled* TransactionalState disposition for each message once received by the consumer
                 TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
                 stateMatcher.withTxnId(equalTo(txnId));
                 stateMatcher.withOutcome(new AcceptedMatcher());
 
                 //TODO: could also match on delivery ID's
-                testPeer.expectDisposition(true, stateMatcher);
+                testPeer.expectDisposition(false, stateMatcher);
             }
 
             final CountDownLatch done = new CountDownLatch(messageCount);

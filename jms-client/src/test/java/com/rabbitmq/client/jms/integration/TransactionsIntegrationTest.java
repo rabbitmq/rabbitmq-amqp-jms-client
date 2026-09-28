@@ -25,6 +25,7 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -404,13 +405,13 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
             testPeer.expectReceiverAttach();
             testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), transferCount);
 
+            // Then expect an *unsettled* TransactionalState disposition for each message once received by
+            // the consumer, because the message remains acquired by the consumer if the transaction rolls back.
+            TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
+            stateMatcher.withTxnId(equalTo(txnId));
+            stateMatcher.withOutcome(new AcceptedMatcher());
             for (int i = 1; i <= consumeCount; i++) {
-                // Then expect an *settled* TransactionalState disposition for each message once received by the consumer
-                TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
-                stateMatcher.withTxnId(equalTo(txnId));
-                stateMatcher.withOutcome(new AcceptedMatcher());
-
-                testPeer.expectDisposition(true, stateMatcher);
+                testPeer.expectDisposition(false, stateMatcher);
             }
 
             final CountDownLatch expected = new CountDownLatch(transferCount);
@@ -454,6 +455,11 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
                 txnId = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
                 testPeer.expectDeclare(txnId);
 
+                // Once committed, expect the consumed messages to be settled.
+                for (int i = 1; i <= consumeCount; i++) {
+                    testPeer.expectDisposition(true, stateMatcher);
+                }
+
                 // Now the deferred close should be performed.
                 testPeer.expectDetach(true, true, true);
 
@@ -467,6 +473,11 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
                 // reply with a declared disposition state containing the txnId.
                 txnId = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
                 testPeer.expectDeclare(txnId);
+
+                // Once committed, expect the consumed messages to be settled.
+                for (int i = 1; i <= consumeCount; i++) {
+                    testPeer.expectDisposition(true, stateMatcher);
+                }
             }
 
             session.commit();
@@ -740,12 +751,13 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
             testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), transferCount);
 
             for (int i = 1; i <= consumeCount; i++) {
-                // Then expect a *settled* TransactionalState disposition for each message once received by the consumer
+                // Then expect an *unsettled* TransactionalState disposition for each message once received by
+                // the consumer, because the message remains acquired by the consumer if the transaction rolls back.
                 TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
                 stateMatcher.withTxnId(equalTo(txnId));
                 stateMatcher.withOutcome(new AcceptedMatcher());
 
-                testPeer.expectDisposition(true, stateMatcher);
+                testPeer.expectDisposition(false, stateMatcher);
             }
 
             MessageConsumer messageConsumer = session.createConsumer(queue);
@@ -777,6 +789,12 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
                 txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
                 testPeer.expectDeclare(txnId);
 
+                // The consumed messages are still acquired by the closing consumer,
+                // which gives them back.
+                for (int i = 1; i <= consumeCount; i++) {
+                    testPeer.expectDisposition(true, new ModifiedMatcher().withDeliveryFailed(equalTo(true)));
+                }
+
                 // Now the deferred close should be performed.
                 testPeer.expectDetach(true, true, true);
 
@@ -804,6 +822,83 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
             testPeer.expectDischarge(txnId, true);
             session.rollback();
 
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    // AMQP 1.0 section 4.4.2: after a rollback "the deliveries will still be "live"
+    // and will remain acquired by the controller".
+    @Test
+    @Timeout(20)
+    public void testRollbackDeliversAcknowledgedMessagesAgain() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            final int messageCount = 2;
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            testPeer.expectCoordinatorAttach();
+
+            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
+            testPeer.expectDeclare(txnId);
+
+            Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+            Queue queue = session.createQueue("myQueue");
+
+            testPeer.expectReceiverAttach();
+            testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"),
+                                                       messageCount, false, false, greaterThan(UnsignedInteger.ZERO), 1, false, true);
+
+            TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
+            stateMatcher.withTxnId(equalTo(txnId));
+            stateMatcher.withOutcome(new AcceptedMatcher());
+            for (int i = 1; i <= messageCount; i++) {
+                testPeer.expectDisposition(false, stateMatcher);
+            }
+
+            MessageConsumer messageConsumer = session.createConsumer(queue);
+            for (int i = 0; i < messageCount; i++) {
+                Message message = messageConsumer.receive(3000);
+                assertNotNull(message);
+                assertEquals(i, message.getIntProperty(TestAmqpPeer.MESSAGE_NUMBER));
+                assertFalse(message.getJMSRedelivered());
+            }
+
+            // Nothing is released: the messages remain acquired by the consumer.
+            testPeer.expectLinkFlow(true, true, greaterThan(UnsignedInteger.ZERO));
+            testPeer.expectDischarge(txnId, true);
+            Binary txnId2 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
+            testPeer.expectDeclare(txnId2);
+            testPeer.expectLinkFlow(false, false, greaterThan(UnsignedInteger.ZERO));
+
+            session.rollback();
+
+            // The messages are delivered again in the same order and acknowledged in the next transaction.
+            TransactionalStateMatcher stateMatcher2 = new TransactionalStateMatcher();
+            stateMatcher2.withTxnId(equalTo(txnId2));
+            stateMatcher2.withOutcome(new AcceptedMatcher());
+            for (int i = 1; i <= messageCount; i++) {
+                testPeer.expectDisposition(false, stateMatcher2);
+            }
+            for (int i = 0; i < messageCount; i++) {
+                Message message = messageConsumer.receive(3000);
+                assertNotNull(message);
+                assertEquals(i, message.getIntProperty(TestAmqpPeer.MESSAGE_NUMBER));
+                assertTrue(message.getJMSRedelivered());
+            }
+
+            testPeer.expectDischarge(txnId2, false);
+            testPeer.expectDeclare(txnId);
+            for (int i = 1; i <= messageCount; i++) {
+                testPeer.expectDisposition(true, stateMatcher2);
+            }
+
+            session.commit();
+
+            testPeer.expectDischarge(txnId, true);
             testPeer.expectClose();
             connection.close();
 
@@ -1547,12 +1642,12 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
             testPeer.expectReceiverAttach();
             testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), 1);
 
-            // Then expect a *settled* TransactionalState disposition for the message once received by the consumer
+            // Then expect an *unsettled* TransactionalState disposition for the message once received by the consumer
             TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
             stateMatcher.withTxnId(equalTo(txnId));
             stateMatcher.withOutcome(new AcceptedMatcher());
 
-            testPeer.expectDisposition(true, stateMatcher);
+            testPeer.expectDisposition(false, stateMatcher);
 
             // Read one so we try to suspend on rollback
             MessageConsumer messageConsumer = session.createConsumer(queue);
@@ -1618,12 +1713,12 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
                 messageCount, false, false, equalTo(UnsignedInteger.valueOf(JmsDefaultPrefetchPolicy.DEFAULT_QUEUE_PREFETCH)), 1, false, true);
 
             for (int i = 1; i <= messageCount; i++) {
-                // Then expect an *settled* TransactionalState disposition for each message once received by the consumer
+                // Then expect an *unsettled* TransactionalState disposition for each message once received by the consumer
                 TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
                 stateMatcher.withTxnId(equalTo(txnId));
                 stateMatcher.withOutcome(new AcceptedMatcher());
 
-                testPeer.expectDisposition(true, stateMatcher);
+                testPeer.expectDisposition(false, stateMatcher);
             }
 
             MessageConsumer consumer = session.createConsumer(queue);
@@ -1685,12 +1780,12 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
             MessageConsumer consumer = session.createConsumer(queue);
 
             for (int i = 0; i < messageCount; i++) {
-                // Then expect an *settled* TransactionalState disposition for each message once received by the consumer
+                // Then expect an *unsettled* TransactionalState disposition for each message once received by the consumer
                 TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
                 stateMatcher.withTxnId(equalTo(txnId));
                 stateMatcher.withOutcome(new AcceptedMatcher());
 
-                testPeer.expectDisposition(true, stateMatcher);
+                testPeer.expectDisposition(false, stateMatcher);
 
                 Message message = consumer.receive(500);
                 assertNotNull(message);
@@ -1704,6 +1799,9 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
                 txnId = txnIdDeque.removeFirst();
                 txnIdDeque.addLast(txnId);
                 testPeer.expectDeclare(txnId);
+
+                // Once committed, expect the message to be settled.
+                testPeer.expectDisposition(true, stateMatcher);
 
                 session.commit();
             }
@@ -1798,11 +1896,12 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
             testPeer.expectDeclare(txnId);
             testPeer.expectReceiverAttach();
             testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), 1);
-            testPeer.expectDisposition(true, dispositionStateMatcher);
+            testPeer.expectDisposition(false, dispositionStateMatcher);
             testPeer.expectSenderAttach();
             testPeer.expectTransfer(messageMatcher, transferStateMatcher, transferTxnOutcome, true);
             testPeer.expectDischarge(txnId, false);
             testPeer.expectDeclare(txnId);
+            testPeer.expectDisposition(true, dispositionStateMatcher);
 
             // Test that consumer onMessage delivery and a send within the listener are
             // both included into the same transaction prior to the commit in the listener.

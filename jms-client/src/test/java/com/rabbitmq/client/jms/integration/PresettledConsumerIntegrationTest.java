@@ -287,13 +287,13 @@ public class PresettledConsumerIntegrationTest extends QpidJmsTestCase {
                 if (!transacted) {
                     testPeer.expectDispositionThatIsAcceptedAndSettled();
                 } else {
-                    // Then expect an *settled* TransactionalState disposition for each message
+                    // Then expect an *unsettled* TransactionalState disposition for each message
                     // once received by the consumer
                     TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
                     stateMatcher.withTxnId(equalTo(txnId));
                     stateMatcher.withOutcome(new AcceptedMatcher());
 
-                    testPeer.expectDisposition(true, stateMatcher);
+                    testPeer.expectDisposition(false, stateMatcher);
                 }
             }
 
