@@ -21,6 +21,7 @@ import static com.rabbitmq.client.jms.provider.amqp.AmqpSupport.MODIFIED_FAILED_
 import static com.rabbitmq.client.jms.provider.amqp.AmqpSupport.REJECTED;
 
 import java.util.ArrayList;
+import java.util.List;
 import java.util.ListIterator;
 import java.util.concurrent.ScheduledFuture;
 
@@ -65,6 +66,10 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     protected int deliveredCount;
     protected int dispatchedCount;
     protected boolean deferredClose;
+    // Deliveries acknowledged in the current transaction. They stay unsettled
+    // until the transaction commits, because they remain acquired by us if it
+    // rolls back.
+    private final List<Delivery> transactedDeliveries = new ArrayList<>();
 
     public AmqpConsumer(AmqpSession session, JmsConsumerInfo info, Receiver receiver) {
         super(info, receiver, session);
@@ -345,6 +350,7 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
 
     private void handleAccepted(JmsInboundMessageDispatch envelope, Delivery delivery) {
         LOG.debug("Accepted Ack of message: {}", envelope);
+        boolean transacted = false;
         if (!delivery.remotelySettled()) {
             if (session.isTransacted() && !getResourceInfo().isBrowser()) {
                 if (session.isTransactionInDoubt()) {
@@ -355,7 +361,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
                 Binary txnId = session.getTransactionContext().getAmqpTransactionId();
                 if (txnId != null) {
                     delivery.disposition(session.getTransactionContext().getTxnAcceptState());
-                    delivery.settle();
+                    transactedDeliveries.add(delivery);
+                    transacted = true;
                     session.getTransactionContext().registerTxConsumer(this);
                 }
             } else {
@@ -370,6 +377,12 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
             deliveredCount--;
         }
         dispatchedCount--;
+
+        if (transacted) {
+            // The delivery stays unsettled, so this keeps it from
+            // being released as a prefetched message.
+            envelope.setDelivered(true);
+        }
     }
 
     private void handleDisposition(JmsInboundMessageDispatch envelope, Delivery delivery, DeliveryState outcome) {
@@ -670,12 +683,52 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     }
 
     public void postCommit() {
+        // The outcome of the acknowledgements has been applied.
+        for (Delivery delivery : transactedDeliveries) {
+            delivery.settle();
+        }
+        transactedDeliveries.clear();
         tryCompleteDeferredClose();
     }
 
     public void postRollback() {
         releasePrefetch();
+        redeliverTransactedDeliveries();
         tryCompleteDeferredClose();
+    }
+
+    /**
+     * After a rollback, the messages acknowledged in the transaction are still
+     * acquired by us, so we deliver them again, as a session recover does.
+     * A consumer that is closing gives them back to the remote peer instead.
+     */
+    private void redeliverTransactedDeliveries() {
+        if (deferredClose) {
+            for (Delivery delivery : transactedDeliveries) {
+                delivery.disposition(MODIFIED_FAILED);
+                delivery.settle();
+            }
+        } else {
+            ListIterator<Delivery> reverseIterator =
+                transactedDeliveries.listIterator(transactedDeliveries.size());
+            while (reverseIterator.hasPrevious()) {
+                Delivery delivery = reverseIterator.previous();
+                if (delivery.getContext() instanceof JmsInboundMessageDispatch) {
+                    JmsInboundMessageDispatch envelope = (JmsInboundMessageDispatch) delivery.getContext();
+                    envelope.getMessage().getFacade().setRedeliveryCount(
+                        envelope.getMessage().getFacade().getRedeliveryCount() + 1);
+                    envelope.setEnqueueFirst(true);
+                    envelope.setDelivered(false);
+                    envelope.setRecovered(true);
+                    try {
+                        deliver(envelope);
+                    } catch (Exception e) {
+                        LOG.warn("{} Failed to deliver message again after rollback: {}", this, e.getMessage());
+                    }
+                }
+            }
+        }
+        transactedDeliveries.clear();
     }
 
     @Override

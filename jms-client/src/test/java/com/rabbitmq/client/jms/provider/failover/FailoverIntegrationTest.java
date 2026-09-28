@@ -4046,7 +4046,7 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectDeclare(txnId1);
             originalPeer.expectReceiverAttach();
             originalPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), 1);
-            originalPeer.expectDisposition(true, dispositionStateMatcher);
+            originalPeer.expectDisposition(false, dispositionStateMatcher);
             originalPeer.expectSenderAttach();
             originalPeer.expectTransfer(messageMatcher, transfer1StateMatcher, false, false, null, false);
             originalPeer.dropAfterLastHandler();
@@ -4181,9 +4181,10 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             finalPeer.expectTransfer(messageMatcher, transferStateMatcher, transferTxnOutcome, true);
             finalPeer.expectReceiverAttach();
             finalPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, amqpValueNullContent);
-            finalPeer.expectDisposition(true, txnDispositionStateMatcher);
+            finalPeer.expectDisposition(false, txnDispositionStateMatcher);
             finalPeer.expectDischarge(txnId1, false);
             finalPeer.expectDeclare(txnId2);
+            finalPeer.expectDisposition(true, txnDispositionStateMatcher);
             finalPeer.expectDischarge(txnId2, true);
             finalPeer.expectClose();
 
@@ -4317,9 +4318,10 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             finalPeer.expectTransfer(messageMatcher, transferStateMatcher, transferTxnOutcome, true);
             finalPeer.expectReceiverAttach();
             finalPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, amqpValueNullContent);
-            finalPeer.expectDisposition(true, txnDispositionStateMatcher);
+            finalPeer.expectDisposition(false, txnDispositionStateMatcher);
             finalPeer.expectDischarge(txnId2, false);
             finalPeer.expectDeclare(txnId1);
+            finalPeer.expectDisposition(true, txnDispositionStateMatcher);
             finalPeer.expectDischarge(txnId1, true);
             finalPeer.expectClose();
 
