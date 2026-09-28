@@ -60,6 +60,7 @@ import com.rabbitmq.client.jms.test.testpeer.basictypes.AmqpError;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declare;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
+import com.rabbitmq.client.jms.test.testpeer.basictypes.TransactionError;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Error;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Modified;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Rejected;
@@ -179,6 +180,45 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
             }
 
             // session should roll back on close
+            testPeer.expectDischarge(txnId2, true);
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testTransactionCommitFailWithRollbackError() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            testPeer.expectCoordinatorAttach();
+
+            Binary txnId1 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
+            testPeer.expectDeclare(txnId1);
+
+            Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+
+            // Reply to the 'discharge' with a rejected outcome carrying the rollback error.
+            Error rejectError = new Error();
+            rejectError.setCondition(TransactionError.TRANSACTION_ROLLBACK);
+            rejectError.setDescription("queue 'myQueue' does not support transactions");
+            testPeer.expectDischarge(txnId1, false, new Rejected().setError(rejectError));
+
+            Binary txnId2 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
+            testPeer.expectDeclare(txnId2);
+
+            try {
+                session.commit();
+                fail("Commit operation should have failed.");
+            } catch (TransactionRolledBackException jmsTxRb) {
+                assertTrue(jmsTxRb.getMessage().contains("does not support transactions"));
+            }
+
             testPeer.expectDischarge(txnId2, true);
             testPeer.expectClose();
             connection.close();

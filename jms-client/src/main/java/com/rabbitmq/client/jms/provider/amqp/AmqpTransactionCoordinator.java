@@ -87,8 +87,11 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
                     LOG.debug("Last TX request failed: {}", txId);
                     Rejected rejected = (Rejected) state;
                     ProviderException cause = AmqpSupport.convertToNonFatalException(getParent().getProvider(), getEndpoint(), rejected.getError());
-                    if (COMMIT_MARKER.equals(txId.getProviderContext()) && !(cause instanceof ProviderTransactionRolledBackException)){
-                        cause = new ProviderTransactionRolledBackException(cause.getMessage(), cause);
+                    if (COMMIT_MARKER.equals(txId.getProviderContext())) {
+                        // A rejected commit has rolled back, for example with amqp:transaction:rollback.
+                        if (!(cause instanceof ProviderTransactionRolledBackException)) {
+                            cause = new ProviderTransactionRolledBackException(cause.getMessage(), cause);
+                        }
                     } else {
                         cause = new ProviderTransactionInDoubtException(cause.getMessage(), cause);
                     }
