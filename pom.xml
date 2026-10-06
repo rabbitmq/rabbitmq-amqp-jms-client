@@ -625,7 +625,7 @@
         <version>${central-publishing-maven-plugin-version}</version>
         <extensions>true</extensions>
         <configuration>
-          <publishingServerId>central</publishingServerId>
+          <publishingServerId>central-portal</publishingServerId>
           <autoPublish>false</autoPublish>
           <!-- Published: parent POM, client, discovery -->
           <excludeArtifacts>
