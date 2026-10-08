@@ -36,12 +36,9 @@ import com.rabbitmq.client.jms.provider.ProviderSynchronization;
  */
 public class JmsXATransactionContext implements JmsTransactionContext {
 
-    private final JmsSession session;
     private final JmsXAResource xaResource;
-    private volatile boolean inBranch;
 
     public JmsXATransactionContext(JmsXASession session) {
-        this.session = session;
         this.xaResource = new JmsXAResource(session);
     }
 
@@ -87,7 +84,6 @@ public class JmsXATransactionContext implements JmsTransactionContext {
     @Override
     public void shutdown() throws JMSException {
         // Closing the session ends its control link, which rolls back an open branch.
-        inBranch = false;
     }
 
     @Override
@@ -106,12 +102,12 @@ public class JmsXATransactionContext implements JmsTransactionContext {
 
     @Override
     public boolean isInTransaction() {
-        return inBranch;
+        return xaResource.isAssociated();
     }
 
     @Override
     public boolean isActiveInThisContext(JmsResourceId resouceId) {
-        return inBranch;
+        return xaResource.isAssociated();
     }
 
     @Override
@@ -122,14 +118,6 @@ public class JmsXATransactionContext implements JmsTransactionContext {
     @Override
     public void onConnectionRecovery(Provider provider) throws Exception {
         xaResource.onConnectionRecovery(provider);
-    }
-
-    void setInBranch(boolean inBranch) {
-        this.inBranch = inBranch;
-    }
-
-    JmsSession getSession() {
-        return session;
     }
 
     JmsXAResource getXAResource() {
