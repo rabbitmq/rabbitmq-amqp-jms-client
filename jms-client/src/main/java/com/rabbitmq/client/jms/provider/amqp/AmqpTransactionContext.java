@@ -198,6 +198,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     //----- XA ---------------------------------------------------------------//
 
     private final Map<String, XaBranch> branches = new HashMap<>();
+    private boolean inUnknownBranch;
 
     /**
      * A branch that was started on this session, and has not been committed or rolled back.
@@ -242,12 +243,10 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                 xaStart(xaRequest, key, result);
                 break;
             case RESUME:
-                if (branch == null) {
-                    result.onFailure(new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest));
-                } else {
-                    setCurrent(branch.txId);
-                    result.onSuccess();
-                }
+                // After a reconnect the branch is unknown, so the work of the session is dropped until it ends.
+                setCurrent(branch == null ? null : branch.txId);
+                inUnknownBranch = branch == null;
+                result.onSuccess();
                 break;
             case END:
                 setCurrent(null);
@@ -374,6 +373,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
 
     private void setCurrent(JmsTransactionId txId) {
         current = txId;
+        inUnknownBranch = false;
         if (txId == null) {
             cachedAcceptedState = null;
             cachedTransactedState = null;
@@ -494,7 +494,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     public boolean isTransactionInDoubt() {
         if (session.getResourceInfo().isXa()) {
             // Outside of a branch, the work is not transactional.
-            return current != null && (coordinator == null || coordinator.isClosed());
+            return inUnknownBranch || current != null && (coordinator == null || coordinator.isClosed());
         }
         // A context either has an active transaction or the transaction state of all
         // operations is in-doubt and cannot proceed as normal.

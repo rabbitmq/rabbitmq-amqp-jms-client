@@ -29,11 +29,8 @@ import com.rabbitmq.client.jms.meta.JmsSessionId;
  */
 public class JmsXASession extends JmsSession implements XASession {
 
-    private final JmsXAResource xaResource;
-
     protected JmsXASession(JmsConnection connection, JmsSessionId sessionId) throws JMSException {
         super(connection, sessionId, Session.SESSION_TRANSACTED);
-        this.xaResource = new JmsXAResource(this);
     }
 
     @Override
@@ -54,7 +51,7 @@ public class JmsXASession extends JmsSession implements XASession {
 
     @Override
     public XAResource getXAResource() {
-        return xaResource;
+        return ((JmsXATransactionContext) getTransactionContext()).getXAResource();
     }
 
     @Override

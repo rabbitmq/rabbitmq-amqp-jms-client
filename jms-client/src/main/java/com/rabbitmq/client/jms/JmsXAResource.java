@@ -21,6 +21,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.transaction.xa.XAException;
 import javax.transaction.xa.XAResource;
@@ -28,6 +29,8 @@ import javax.transaction.xa.Xid;
 
 import com.rabbitmq.client.jms.meta.JmsXaRequest;
 import com.rabbitmq.client.jms.meta.JmsXaRequest.Type;
+import com.rabbitmq.client.jms.provider.Provider;
+import com.rabbitmq.client.jms.provider.ProviderFuture;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutException;
 
 /**
@@ -43,10 +46,25 @@ public class JmsXAResource implements XAResource {
         ACTIVE, SUSPENDED, ENDED, ROLLBACK_ONLY, PREPARED
     }
 
+    private static final class Branch {
+
+        private final Xid xid;
+        private final String key;
+        private final long interruptions;
+        private State state;
+
+        private Branch(Xid xid, String key, long interruptions) {
+            this.xid = xid;
+            this.key = key;
+            this.interruptions = interruptions;
+        }
+    }
+
     private final JmsXASession session;
     private final JmsConnection connection;
-    private final Map<String, State> branches = new HashMap<>();
-    private Xid current;
+    private final Map<String, Branch> branches = new HashMap<>();
+    private final AtomicLong interruptions = new AtomicLong();
+    private volatile Branch current;
 
     JmsXAResource(JmsXASession session) {
         this.session = session;
@@ -56,25 +74,29 @@ public class JmsXAResource implements XAResource {
     @Override
     public synchronized void start(Xid xid, int flags) throws XAException {
         String key = key(xid);
-        State state = branches.get(key);
+        Branch branch = branches.get(key);
         switch (flags) {
             case TMNOFLAGS:
                 if (current != null) {
                     throw new XAException(XAException.XAER_PROTO);
                 }
-                if (state != null) {
+                if (branch != null) {
                     throw new XAException(XAException.XAER_DUPID);
                 }
+                // Read before the request, so that an interruption during the request loses the branch.
+                long interruptionsAtStart = interruptions.get();
                 JmsXaRequest start = new JmsXaRequest(Type.START, session.getSessionId(), xid)
                     .setTransactionId(connection.getNextTransactionId());
                 connection.xa(start);
+                branch = new Branch(xid, key, interruptionsAtStart);
+                branches.put(key, branch);
                 break;
             case TMJOIN:
             case TMRESUME:
                 if (current != null) {
                     throw new XAException(XAException.XAER_PROTO);
                 }
-                if (state != State.SUSPENDED && state != State.ENDED) {
+                if (branch == null || (branch.state != State.SUSPENDED && branch.state != State.ENDED)) {
                     throw new XAException(XAException.XAER_NOTA);
                 }
                 connection.xa(new JmsXaRequest(Type.RESUME, session.getSessionId(), xid));
@@ -82,15 +104,15 @@ public class JmsXAResource implements XAResource {
             default:
                 throw new XAException(XAException.XAER_INVAL);
         }
-        branches.put(key, State.ACTIVE);
-        current = xid;
+        branch.state = State.ACTIVE;
+        current = branch;
         context().setInBranch(true);
     }
 
     @Override
     public synchronized void end(Xid xid, int flags) throws XAException {
-        String key = key(xid);
-        if (current == null || !key(current).equals(key)) {
+        Branch branch = current;
+        if (branch == null || !branch.key.equals(key(xid))) {
             throw new XAException(XAException.XAER_PROTO);
         }
         State next;
@@ -107,44 +129,66 @@ public class JmsXAResource implements XAResource {
             default:
                 throw new XAException(XAException.XAER_INVAL);
         }
-        connection.xa(new JmsXaRequest(Type.END, session.getSessionId(), xid));
-        branches.put(key, next);
+        // Dissociated first, so that a recovery during the request does not associate the session again.
         current = null;
         context().setInBranch(false);
+        try {
+            connection.xa(new JmsXaRequest(Type.END, session.getSessionId(), xid));
+        } catch (XAException e) {
+            if (!isLost(branch)) {
+                current = branch;
+                context().setInBranch(true);
+                throw e;
+            }
+        }
+        branch.state = next;
     }
 
     @Override
     public synchronized int prepare(Xid xid) throws XAException {
-        String key = key(xid);
-        State state = branches.get(key);
-        if (state == State.ROLLBACK_ONLY) {
-            rollbackBranch(xid, key);
+        Branch branch = branches.get(key(xid));
+        if (branch == null) {
+            throw new XAException(XAException.XAER_NOTA);
+        }
+        if (branch.state == State.ROLLBACK_ONLY) {
+            rollbackBranch(xid, branch.key, branch);
             throw new XAException(XAException.XA_RBROLLBACK);
         }
-        if (state != State.ENDED) {
-            throw new XAException(state == null ? XAException.XAER_NOTA : XAException.XAER_PROTO);
+        if (branch.state != State.ENDED) {
+            throw new XAException(XAException.XAER_PROTO);
+        }
+        if (isLost(branch)) {
+            branches.remove(branch.key);
+            throw new XAException(XAException.XA_RBROLLBACK);
         }
         try {
             connection.xa(new JmsXaRequest(Type.PREPARE, session.getSessionId(), xid));
         } catch (XAException e) {
-            branches.remove(key);
+            branches.remove(branch.key);
             throw e;
         }
-        branches.put(key, State.PREPARED);
+        branch.state = State.PREPARED;
         return XA_OK;
     }
 
     @Override
     public synchronized void commit(Xid xid, boolean onePhase) throws XAException {
         String key = key(xid);
-        State state = branches.get(key);
+        Branch branch = branches.get(key);
         if (onePhase) {
-            if (state == State.ROLLBACK_ONLY) {
-                rollbackBranch(xid, key);
+            if (branch == null) {
+                throw new XAException(XAException.XAER_NOTA);
+            }
+            if (branch.state == State.ROLLBACK_ONLY) {
+                rollbackBranch(xid, key, branch);
                 throw new XAException(XAException.XA_RBROLLBACK);
             }
-            if (state != State.ENDED) {
-                throw new XAException(state == null ? XAException.XAER_NOTA : XAException.XAER_PROTO);
+            if (branch.state != State.ENDED) {
+                throw new XAException(XAException.XAER_PROTO);
+            }
+            if (isLost(branch)) {
+                branches.remove(key);
+                throw new XAException(XAException.XA_RBROLLBACK);
             }
             try {
                 connection.xa(new JmsXaRequest(Type.COMMIT_ONE_PHASE, session.getSessionId(), xid));
@@ -152,7 +196,7 @@ public class JmsXAResource implements XAResource {
                 branches.remove(key);
             }
         } else {
-            if (state != null && state != State.PREPARED) {
+            if (branch != null && branch.state != State.PREPARED) {
                 throw new XAException(XAException.XAER_PROTO);
             }
             try {
@@ -171,20 +215,31 @@ public class JmsXAResource implements XAResource {
     @Override
     public synchronized void rollback(Xid xid) throws XAException {
         String key = key(xid);
-        rollbackBranch(xid, key);
+        rollbackBranch(xid, key, branches.get(key));
     }
 
-    private void rollbackBranch(Xid xid, String key) throws XAException {
-        State state = branches.get(key);
-        if (current != null && key(current).equals(key)) {
+    private void rollbackBranch(Xid xid, String key, Branch branch) throws XAException {
+        boolean associated = branch != null && branch == current;
+        if (associated) {
             current = null;
             context().setInBranch(false);
+        }
+        if (branch != null && isLost(branch)) {
+            branches.remove(key);
+            if (associated) {
+                // A recovery of the connection may have associated the session with the branch again.
+                try {
+                    connection.xa(new JmsXaRequest(Type.END, session.getSessionId(), xid));
+                } catch (XAException ignored) {
+                }
+            }
+            return;
         }
         try {
             connection.xa(new JmsXaRequest(Type.ROLLBACK, session.getSessionId(), xid));
         } catch (XAException e) {
             // A branch that is not open on this session is rolled back by its xid.
-            throw state == State.PREPARED || state == null ? preparedRollbackFailure(e) : e;
+            throw branch == null || branch.state == State.PREPARED ? preparedRollbackFailure(e) : e;
         } finally {
             branches.remove(key);
         }
@@ -272,6 +327,31 @@ public class JmsXAResource implements XAResource {
     @Override
     public boolean setTransactionTimeout(int seconds) {
         return false;
+    }
+
+    /**
+     * The broker rolls back a branch that has not been prepared when the connection is lost.
+     */
+    private boolean isLost(Branch branch) {
+        return branch.state != State.PREPARED && branch.interruptions != interruptions.get();
+    }
+
+    boolean isAssociatedWithLostBranch() {
+        Branch branch = current;
+        return branch != null && isLost(branch);
+    }
+
+    void onConnectionInterrupted() {
+        interruptions.incrementAndGet();
+    }
+
+    void onConnectionRecovery(Provider provider) throws Exception {
+        Branch branch = current;
+        if (branch != null) {
+            ProviderFuture request = provider.newProviderFuture();
+            provider.xa(new JmsXaRequest(Type.RESUME, session.getSessionId(), branch.xid), request);
+            request.sync();
+        }
     }
 
     private JmsXATransactionContext context() {

@@ -1,0 +1,357 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.rabbitmq.client.jms.integration;
+
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import javax.transaction.xa.XAException;
+import javax.transaction.xa.XAResource;
+import javax.transaction.xa.Xid;
+
+import jakarta.jms.MessageConsumer;
+import jakarta.jms.MessageProducer;
+import jakarta.jms.XASession;
+
+import com.rabbitmq.client.jms.JmsConnection;
+import com.rabbitmq.client.jms.JmsConnectionFactory;
+import com.rabbitmq.client.jms.JmsDefaultConnectionListener;
+import com.rabbitmq.client.jms.JmsXAConnection;
+import com.rabbitmq.client.jms.test.QpidJmsTestCase;
+import com.rabbitmq.client.jms.test.testpeer.ListDescribedType;
+import com.rabbitmq.client.jms.test.testpeer.TestAmqpPeer;
+import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
+import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
+import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
+import com.rabbitmq.client.jms.test.testpeer.matchers.TransactionalStateMatcher;
+import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessageAnnotationsSectionMatcher;
+import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessageHeaderSectionMatcher;
+import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessagePropertiesSectionMatcher;
+import com.rabbitmq.client.jms.test.testpeer.matchers.sections.TransferPayloadCompositeMatcher;
+import com.rabbitmq.client.jms.test.testpeer.matchers.types.EncodedAmqpValueMatcher;
+import org.apache.qpid.proton.amqp.Binary;
+import org.apache.qpid.proton.amqp.DescribedType;
+import org.apache.qpid.proton.amqp.Symbol;
+import org.apache.qpid.proton.amqp.UnsignedLong;
+import org.apache.qpid.proton.codec.Data;
+import org.hamcrest.Description;
+import org.hamcrest.TypeSafeMatcher;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+/**
+ * Tests for the XA transactions of the RabbitMQ AMQP 1.0 extension.
+ */
+public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
+
+    private static final UnsignedLong DECLARE = UnsignedLong.valueOf(0x31L);
+    private static final Symbol XID = Symbol.valueOf("rabbitmq:xid");
+    private static final Symbol XA_PREPARE = Symbol.valueOf("rabbitmq:xa-prepare");
+    private static final Symbol XA_COMMIT = Symbol.valueOf("rabbitmq:xa-commit");
+
+    private static final Binary TXN_ID_1 = new Binary(new byte[] { 1, 2, 3, 4 });
+    private static final Binary TXN_ID_2 = new Binary(new byte[] { 5, 6, 7, 8 });
+
+    @Test
+    @Timeout(20)
+    public void testSendsInBranchLostOnFailoverAreDropped() throws Exception {
+        try (TestAmqpPeer originalPeer = new TestAmqpPeer();
+             TestAmqpPeer finalPeer = new TestAmqpPeer()) {
+
+            Xid xid = new TestXid(1);
+
+            originalPeer.expectSaslAnonymous();
+            originalPeer.expectOpen();
+            originalPeer.expectBegin();
+            originalPeer.expectBegin();
+            originalPeer.expectCoordinatorAttach();
+            expectXaDeclare(originalPeer, xid, TXN_ID_1);
+            originalPeer.expectSenderAttach();
+            TransactionalStateMatcher inBranch = new TransactionalStateMatcher().withTxnId(equalTo(TXN_ID_1));
+            originalPeer.expectTransfer(textMessage("lost"), inBranch, false, false, null, false);
+            originalPeer.dropAfterLastHandler();
+
+            finalPeer.expectSaslAnonymous();
+            finalPeer.expectOpen();
+            finalPeer.expectBegin();
+            finalPeer.expectBegin();
+            finalPeer.expectSenderAttach();
+
+            JmsXAConnection connection = createFailoverXAConnection("jms.forceSyncSend=true", originalPeer, finalPeer);
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            resource.start(xid, XAResource.TMNOFLAGS);
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+
+            // Returns once the send has been replayed on the final peer.
+            producer.send(session.createTextMessage("lost"));
+            producer.send(session.createTextMessage("dropped"));
+
+            resource.end(xid, XAResource.TMSUCCESS);
+            assertXaError(XAException.XA_RBROLLBACK, () -> resource.prepare(xid));
+
+            finalPeer.expectTransfer(textMessage("outside"));
+            producer.send(session.createTextMessage("outside"));
+
+            finalPeer.expectClose();
+            connection.close();
+
+            originalPeer.waitForAllHandlersToComplete(2000);
+            finalPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testAcknowledgementsInBranchLostOnFailoverAreDropped() throws Exception {
+        try (TestAmqpPeer originalPeer = new TestAmqpPeer();
+             TestAmqpPeer finalPeer = new TestAmqpPeer()) {
+
+            Xid xid = new TestXid(1);
+
+            originalPeer.expectSaslAnonymous();
+            originalPeer.expectOpen();
+            originalPeer.expectBegin();
+            originalPeer.expectBegin();
+            originalPeer.expectCoordinatorAttach();
+            expectXaDeclare(originalPeer, xid, TXN_ID_1);
+            originalPeer.dropAfterLastHandler();
+
+            finalPeer.expectSaslAnonymous();
+            finalPeer.expectOpen();
+            finalPeer.expectBegin();
+            finalPeer.expectBegin();
+
+            JmsXAConnection connection = createFailoverXAConnection(null, originalPeer, finalPeer);
+            CountDownLatch restored = awaitRestored(connection);
+            connection.start();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            resource.start(xid, XAResource.TMNOFLAGS);
+            assertTrue(restored.await(5, TimeUnit.SECONDS), "Should reconnect to the final peer");
+
+            finalPeer.expectReceiverAttach();
+            finalPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), 1);
+            MessageConsumer consumer = session.createConsumer(session.createQueue("myQueue"));
+            assertNotNull(consumer.receive(3000));
+
+            resource.rollback(xid);
+
+            finalPeer.expectSenderAttach();
+            finalPeer.expectTransfer(textMessage("outside"));
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+            producer.send(session.createTextMessage("outside"));
+
+            finalPeer.expectClose();
+            connection.close();
+
+            originalPeer.waitForAllHandlersToComplete(2000);
+            finalPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testOnlyPreparedBranchesSurviveFailover() throws Exception {
+        try (TestAmqpPeer originalPeer = new TestAmqpPeer();
+             TestAmqpPeer finalPeer = new TestAmqpPeer()) {
+
+            Xid prepared = new TestXid(1);
+            Xid lost = new TestXid(2);
+
+            originalPeer.expectSaslAnonymous();
+            originalPeer.expectOpen();
+            originalPeer.expectBegin();
+            originalPeer.expectBegin();
+            originalPeer.expectCoordinatorAttach();
+            expectXaDeclare(originalPeer, prepared, TXN_ID_1);
+            expectXaControl(originalPeer, XA_PREPARE, TXN_ID_1, new Accepted());
+            expectXaDeclare(originalPeer, lost, TXN_ID_2);
+            originalPeer.dropAfterLastHandler();
+
+            finalPeer.expectSaslAnonymous();
+            finalPeer.expectOpen();
+            finalPeer.expectBegin();
+            finalPeer.expectBegin();
+
+            JmsXAConnection connection = createFailoverXAConnection(null, originalPeer, finalPeer);
+            CountDownLatch restored = awaitRestored(connection);
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            resource.start(prepared, XAResource.TMNOFLAGS);
+            resource.end(prepared, XAResource.TMSUCCESS);
+            assertEquals(XAResource.XA_OK, resource.prepare(prepared));
+            resource.start(lost, XAResource.TMNOFLAGS);
+            assertTrue(restored.await(5, TimeUnit.SECONDS), "Should reconnect to the final peer");
+
+            resource.end(lost, XAResource.TMSUCCESS);
+            resource.rollback(lost);
+            assertXaError(XAException.XAER_NOTA, () -> resource.prepare(lost));
+
+            finalPeer.expectCoordinatorAttach();
+            expectXaControl(finalPeer, XA_COMMIT, xid(prepared), new Accepted());
+            resource.commit(prepared, false);
+
+            finalPeer.expectClose();
+            connection.close();
+
+            originalPeer.waitForAllHandlersToComplete(2000);
+            finalPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    //----- Test support -----------------------------------------------------//
+
+    private interface XaCall {
+        void run() throws XAException;
+    }
+
+    private static void assertXaError(int errorCode, XaCall call) {
+        XAException failure = assertThrows(XAException.class, call::run);
+        assertEquals(errorCode, failure.errorCode);
+    }
+
+    private JmsXAConnection createFailoverXAConnection(String options, TestAmqpPeer... peers) throws Exception {
+        List<String> uris = new ArrayList<>();
+        for (TestAmqpPeer peer : peers) {
+            uris.add("amqp://localhost:" + peer.getServerPort());
+        }
+        String uri = "failover:(" + String.join(",", uris) + ")?failover.maxReconnectAttempts=10"
+            + (options == null ? "" : "&" + options);
+        return (JmsXAConnection) new JmsConnectionFactory(uri).createXAConnection();
+    }
+
+    private static CountDownLatch awaitRestored(JmsConnection connection) {
+        CountDownLatch restored = new CountDownLatch(1);
+        connection.addConnectionListener(new JmsDefaultConnectionListener() {
+            @Override
+            public void onConnectionRestored(URI remoteURI) {
+                restored.countDown();
+            }
+        });
+        return restored;
+    }
+
+    private static void expectXaDeclare(TestAmqpPeer peer, Xid xid, Binary txnId) {
+        peer.expectTransfer(new ControlMatcher(DECLARE, xid(xid)), nullValue(), new Declared().setTxnId(txnId), true);
+    }
+
+    private static void expectXaControl(TestAmqpPeer peer, Object descriptor, Object field, ListDescribedType reply) {
+        peer.expectTransfer(new ControlMatcher(descriptor, field), nullValue(), reply, true);
+    }
+
+    private static List<Object> xid(Xid xid) {
+        return Arrays.asList(XID, Arrays.asList(xid.getFormatId(),
+            new Binary(xid.getGlobalTransactionId()), new Binary(xid.getBranchQualifier())));
+    }
+
+    private static TransferPayloadCompositeMatcher textMessage(String text) {
+        TransferPayloadCompositeMatcher matcher = new TransferPayloadCompositeMatcher();
+        matcher.setHeadersMatcher(new MessageHeaderSectionMatcher(true));
+        matcher.setMessageAnnotationsMatcher(new MessageAnnotationsSectionMatcher(true));
+        matcher.setPropertiesMatcher(new MessagePropertiesSectionMatcher(true));
+        matcher.setMessageContentMatcher(new EncodedAmqpValueMatcher(text));
+        return matcher;
+    }
+
+    /**
+     * Matches the amqp-value body of a message on the coordinator link, with the described
+     * types it contains written as lists of descriptor and fields.
+     */
+    private static final class ControlMatcher extends TypeSafeMatcher<Binary> {
+
+        private final List<Object> expected;
+
+        private ControlMatcher(Object descriptor, Object... fields) {
+            this.expected = Arrays.asList(descriptor, Arrays.asList(fields));
+        }
+
+        @Override
+        protected boolean matchesSafely(Binary payload) {
+            Data data = Data.Factory.create();
+            data.decode(payload.asByteBuffer());
+            return expected.equals(normalize(data.getDescribedType().getDescribed()));
+        }
+
+        private static Object normalize(Object value) {
+            if (value instanceof DescribedType) {
+                DescribedType described = (DescribedType) value;
+                return Arrays.asList(described.getDescriptor(), normalize(described.getDescribed()));
+            }
+            if (value instanceof List) {
+                List<Object> result = new ArrayList<>();
+                for (Object element : (List<?>) value) {
+                    result.add(normalize(element));
+                }
+                return result;
+            }
+            return value;
+        }
+
+        @Override
+        public void describeTo(Description description) {
+            description.appendText("a control message ").appendValue(expected);
+        }
+
+        @Override
+        protected void describeMismatchSafely(Binary payload, Description description) {
+            Data data = Data.Factory.create();
+            data.decode(payload.asByteBuffer());
+            description.appendText("was ").appendValue(normalize(data.getDescribedType().getDescribed()));
+        }
+    }
+
+    private static final class TestXid implements Xid {
+
+        private final byte[] globalTransactionId;
+        private final byte[] branchQualifier;
+
+        private TestXid(int id) {
+            this.globalTransactionId = new byte[] { (byte) id };
+            this.branchQualifier = new byte[] { (byte) id, 0 };
+        }
+
+        @Override
+        public int getFormatId() {
+            return 1;
+        }
+
+        @Override
+        public byte[] getGlobalTransactionId() {
+            return globalTransactionId;
+        }
+
+        @Override
+        public byte[] getBranchQualifier() {
+            return branchQualifier;
+        }
+    }
+}
