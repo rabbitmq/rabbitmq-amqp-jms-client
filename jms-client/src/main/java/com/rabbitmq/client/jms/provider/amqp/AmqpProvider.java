@@ -793,6 +793,9 @@ public class AmqpProvider implements Provider, TransportListener , AmqpResourceP
             try {
                 checkClosedOrFailed();
                 AmqpSession session = connection.getSession(xaRequest.getSessionId());
+                if (session == null && xaRequest.runsOnAnySession()) {
+                    session = connection.getConnectionSession();
+                }
                 if (session != null) {
                     session.xa(xaRequest, request);
                     pumpToProtonTransport(request);

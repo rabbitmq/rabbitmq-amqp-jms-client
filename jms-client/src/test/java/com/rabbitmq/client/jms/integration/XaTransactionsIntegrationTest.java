@@ -16,6 +16,7 @@
  */
 package com.rabbitmq.client.jms.integration;
 
+import static org.hamcrest.Matchers.arrayContaining;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -51,6 +52,7 @@ import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.matchers.AcceptedMatcher;
+import com.rabbitmq.client.jms.test.testpeer.matchers.CoordinatorMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.TransactionalStateMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessageAnnotationsSectionMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessageHeaderSectionMatcher;
@@ -61,6 +63,7 @@ import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.DescribedType;
 import org.apache.qpid.proton.amqp.Symbol;
 import org.apache.qpid.proton.amqp.UnsignedLong;
+import org.apache.qpid.proton.amqp.transaction.TxnCapability;
 import org.apache.qpid.proton.codec.Data;
 import org.hamcrest.Description;
 import org.hamcrest.TypeSafeMatcher;
@@ -72,6 +75,7 @@ import org.junit.jupiter.api.Timeout;
  */
 public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
 
+    private static final Symbol XA_CAPABILITY = Symbol.valueOf("rabbitmq:xa");
     private static final UnsignedLong DECLARE = UnsignedLong.valueOf(0x31L);
     private static final Symbol XID = Symbol.valueOf("rabbitmq:xid");
     private static final Symbol XA_PREPARE = Symbol.valueOf("rabbitmq:xa-prepare");
@@ -94,7 +98,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectOpen();
             originalPeer.expectBegin();
             originalPeer.expectBegin();
-            originalPeer.expectCoordinatorAttach();
+            expectXaCoordinatorAttach(originalPeer);
             expectXaDeclare(originalPeer, xid, TXN_ID_1);
             originalPeer.expectSenderAttach();
             TransactionalStateMatcher inBranch = new TransactionalStateMatcher().withTxnId(equalTo(TXN_ID_1));
@@ -144,7 +148,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectOpen();
             originalPeer.expectBegin();
             originalPeer.expectBegin();
-            originalPeer.expectCoordinatorAttach();
+            expectXaCoordinatorAttach(originalPeer);
             expectXaDeclare(originalPeer, xid, TXN_ID_1);
             originalPeer.dropAfterLastHandler();
 
@@ -195,7 +199,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectOpen();
             originalPeer.expectBegin();
             originalPeer.expectBegin();
-            originalPeer.expectCoordinatorAttach();
+            expectXaCoordinatorAttach(originalPeer);
             expectXaDeclare(originalPeer, prepared, TXN_ID_1);
             expectXaControl(originalPeer, XA_PREPARE, TXN_ID_1, new Accepted());
             expectXaDeclare(originalPeer, lost, TXN_ID_2);
@@ -221,7 +225,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             resource.rollback(lost);
             assertXaError(XAException.XAER_NOTA, () -> resource.prepare(lost));
 
-            finalPeer.expectCoordinatorAttach();
+            expectXaCoordinatorAttach(finalPeer);
             expectXaControl(finalPeer, XA_COMMIT, xid(prepared), new Accepted());
             resource.commit(prepared, false);
 
@@ -258,7 +262,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             MessageConsumer consumer = session.createConsumer(session.createQueue("myQueue"));
             assertTrue(prefetched.await(5, TimeUnit.SECONDS), "Should have prefetched the message");
 
-            testPeer.expectCoordinatorAttach();
+            expectXaCoordinatorAttach(testPeer);
             expectXaDeclare(testPeer, xid, TXN_ID_1);
             resource.start(xid, XAResource.TMNOFLAGS);
 
@@ -272,6 +276,54 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
 
             testPeer.expectClose();
             connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testBranchesCanBeCompletedAfterSessionClose() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid prepared = new TestXid(1);
+            Xid toPrepare = new TestXid(2);
+            Xid toCommit = new TestXid(3);
+            Xid toRollback = new TestXid(4);
+
+            JmsXAConnection connection = createXAConnection(testPeer);
+
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, prepared, TXN_ID_1);
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_1, new Accepted());
+            resource.start(prepared, XAResource.TMNOFLAGS);
+            resource.end(prepared, XAResource.TMSUCCESS);
+            assertEquals(XAResource.XA_OK, resource.prepare(prepared));
+
+            for (Xid xid : new Xid[] { toPrepare, toCommit, toRollback }) {
+                expectXaDeclare(testPeer, xid, TXN_ID_2);
+                resource.start(xid, XAResource.TMNOFLAGS);
+                resource.end(xid, XAResource.TMSUCCESS);
+            }
+
+            testPeer.expectEnd();
+            session.close();
+
+            assertXaError(XAException.XA_RBROLLBACK, () -> resource.prepare(toPrepare));
+            assertXaError(XAException.XA_RBROLLBACK, () -> resource.commit(toCommit, true));
+            resource.rollback(toRollback);
+
+            expectXaCoordinatorAttach(testPeer);
+            expectXaControl(testPeer, XA_COMMIT, xid(prepared), new Accepted());
+            resource.commit(prepared, false);
+
+            testPeer.expectClose();
+            connection.close();
+
+            assertXaError(XAException.XAER_RMFAIL, () -> resource.recover(XAResource.TMSTARTRSCAN));
 
             testPeer.waitForAllHandlersToComplete(1000);
         }
@@ -322,6 +374,12 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             }
         });
         return restored;
+    }
+
+    private static void expectXaCoordinatorAttach(TestAmqpPeer peer) {
+        CoordinatorMatcher coordinator = new CoordinatorMatcher()
+            .withCapabilities(arrayContaining(TxnCapability.LOCAL_TXN, XA_CAPABILITY));
+        peer.expectSenderAttach(coordinator, false, false);
     }
 
     private static void expectXaDeclare(TestAmqpPeer peer, Xid xid, Binary txnId) {
