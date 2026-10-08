@@ -40,6 +40,7 @@ import com.rabbitmq.client.jms.provider.exceptions.ProviderTransactionRolledBack
 import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.DescribedType;
 import org.apache.qpid.proton.amqp.Symbol;
+import org.apache.qpid.proton.amqp.messaging.Accepted;
 import org.apache.qpid.proton.amqp.messaging.Modified;
 import org.apache.qpid.proton.amqp.transaction.GlobalTxId;
 import org.apache.qpid.proton.amqp.transport.ErrorCondition;
@@ -92,23 +93,13 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
                 AsyncResult pendingRequest = context.getRequest();
                 JmsTransactionId txId = context.getTransactionId();
 
-                if (state instanceof Declared) {
+                if (context.getXaRequest() != null) {
+                    completeXa(context.getXaRequest(), state, txId, pendingRequest);
+                } else if (state instanceof Declared) {
                     LOG.debug("New TX started: {}", txId);
                     Declared declared = (Declared) state;
                     txId.setProviderHint(declared.getTxnId());
                     pendingRequest.onSuccess();
-                } else if (state instanceof Rejected && context.getXaRequest() != null) {
-                    LOG.debug("Last XA request failed: {}", context.getXaRequest());
-                    pendingRequest.onFailure(toXaException(((Rejected) state).getError()));
-                } else if (state instanceof Modified && context.getXaRequest() != null
-                           && context.getXaRequest().getType() == JmsXaRequest.Type.RECOVER) {
-                    try {
-                        readRecovered((Modified) state, context.getXaRequest());
-                        pendingRequest.onSuccess();
-                    } catch (RuntimeException e) {
-                        pendingRequest.onFailure(new ProviderXaException(XAException.XAER_RMERR,
-                            "Unexpected reply to recover: " + e.getMessage(), e));
-                    }
                 } else if (state instanceof Rejected) {
                     LOG.debug("Last TX request failed: {}", txId);
                     Rejected rejected = (Rejected) state;
@@ -300,9 +291,36 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
             new Binary(xid.getGlobalTransactionId()), new Binary(xid.getBranchQualifier())));
     }
 
+    private static void completeXa(JmsXaRequest xaRequest, DeliveryState state, JmsTransactionId txId, AsyncResult request) {
+        JmsXaRequest.Type type = xaRequest.getType();
+        if (state instanceof Rejected) {
+            LOG.debug("Last XA request failed: {}", xaRequest);
+            request.onFailure(toXaException(((Rejected) state).getError()));
+        } else if (type == JmsXaRequest.Type.START && state instanceof Declared) {
+            txId.setProviderHint(((Declared) state).getTxnId());
+            request.onSuccess();
+        } else if (type == JmsXaRequest.Type.RECOVER && state instanceof Modified) {
+            try {
+                readRecovered((Modified) state, xaRequest);
+                request.onSuccess();
+            } catch (RuntimeException e) {
+                request.onFailure(new ProviderXaException(XAException.XAER_RMERR,
+                    "Unexpected reply to recover: " + e.getMessage(), e));
+            }
+        } else if (type != JmsXaRequest.Type.START && type != JmsXaRequest.Type.RECOVER && state instanceof Accepted) {
+            request.onSuccess();
+        } else {
+            request.onFailure(new ProviderXaException(XAException.XAER_RMERR,
+                "Unexpected reply " + state + " to " + xaRequest));
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static void readRecovered(Modified modified, JmsXaRequest xaRequest) {
         Map<Symbol, Object> annotations = modified.getMessageAnnotations();
+        if (annotations == null || !(annotations.get(XA_ANN_XIDS) instanceof List)) {
+            throw new IllegalArgumentException("no " + XA_ANN_XIDS + " annotation");
+        }
         List<Xid> xids = new ArrayList<>();
         for (Object entry : (List<Object>) annotations.get(XA_ANN_XIDS)) {
             List<Object> fields = (List<Object>) entry;
