@@ -55,6 +55,7 @@ import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Modified;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Released;
+import com.rabbitmq.client.jms.test.testpeer.describedtypes.TransactionalState;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.matchers.AcceptedMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.CoordinatorMatcher;
@@ -524,6 +525,50 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             Modified reservedKeys = recovered(Symbol.valueOf("rabbitmq:xids"), Symbol.valueOf("rabbitmq:more"), first, false);
             testPeer.expectTransfer(new ControlMatcher(XA_RECOVER), nullValue(), reservedKeys, true);
             assertXaError(XAException.XAER_RMERR, () -> resource.recover(XAResource.TMSTARTRSCAN));
+
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testCompletingAnotherBranchKeepsTheAssociation() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid toPrepare = new TestXid(1);
+            Xid toRollback = new TestXid(2);
+            Xid associated = new TestXid(3);
+            Binary txnId3 = new Binary(new byte[] { 9 });
+
+            JmsXAConnection connection = createXAConnection(testPeer);
+
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+            testPeer.expectSenderAttach();
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, toPrepare, TXN_ID_1);
+            expectXaDeclare(testPeer, toRollback, TXN_ID_2);
+            expectXaDeclare(testPeer, associated, txnId3);
+            for (Xid xid : new Xid[] { toPrepare, toRollback }) {
+                resource.start(xid, XAResource.TMNOFLAGS);
+                resource.end(xid, XAResource.TMSUCCESS);
+            }
+            resource.start(associated, XAResource.TMNOFLAGS);
+
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_1, new Accepted());
+            resource.prepare(toPrepare);
+            testPeer.expectDischarge(TXN_ID_2, true);
+            resource.rollback(toRollback);
+
+            TransactionalState accepted = new TransactionalState().setTxnId(txnId3).setOutcome(new Accepted());
+            testPeer.expectTransfer(textMessage("associated"),
+                new TransactionalStateMatcher().withTxnId(equalTo(txnId3)), accepted, true);
+            producer.send(session.createTextMessage("associated"));
 
             testPeer.expectClose();
             connection.close();
