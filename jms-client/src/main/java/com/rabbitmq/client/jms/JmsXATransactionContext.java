@@ -37,14 +37,25 @@ import com.rabbitmq.client.jms.provider.ProviderSynchronization;
 public class JmsXATransactionContext implements JmsTransactionContext {
 
     private final JmsSession session;
+    private final JmsXAResource xaResource;
     private volatile boolean inBranch;
 
-    public JmsXATransactionContext(JmsSession session) {
+    public JmsXATransactionContext(JmsXASession session) {
         this.session = session;
+        this.xaResource = new JmsXAResource(session);
     }
 
     @Override
     public void send(JmsConnection connection, JmsOutboundMessageDispatch envelope, ProviderSynchronization outcome) throws JMSException {
+        if (xaResource.isAssociatedWithLostBranch()) {
+            if (outcome != null) {
+                outcome.onPendingSuccess();
+            }
+            if (envelope.isCompletionRequired()) {
+                connection.onCompletedMessageSend(envelope);
+            }
+            return;
+        }
         connection.send(envelope, outcome);
     }
 
@@ -55,7 +66,7 @@ public class JmsXATransactionContext implements JmsTransactionContext {
 
     @Override
     public boolean isInDoubt() {
-        return false;
+        return xaResource.isAssociatedWithLostBranch();
     }
 
     @Override
@@ -105,12 +116,12 @@ public class JmsXATransactionContext implements JmsTransactionContext {
 
     @Override
     public void onConnectionInterrupted() {
-        // An open branch does not survive the connection.
-        inBranch = false;
+        xaResource.onConnectionInterrupted();
     }
 
     @Override
     public void onConnectionRecovery(Provider provider) throws Exception {
+        xaResource.onConnectionRecovery(provider);
     }
 
     void setInBranch(boolean inBranch) {
@@ -119,5 +130,9 @@ public class JmsXATransactionContext implements JmsTransactionContext {
 
     JmsSession getSession() {
         return session;
+    }
+
+    JmsXAResource getXAResource() {
+        return xaResource;
     }
 }
