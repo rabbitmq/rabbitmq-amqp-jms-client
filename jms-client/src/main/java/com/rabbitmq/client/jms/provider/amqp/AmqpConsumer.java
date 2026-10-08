@@ -364,6 +364,10 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
                     transactedDeliveries.add(delivery);
                     transacted = true;
                     session.getTransactionContext().registerTxConsumer(this);
+                } else if (session.getResourceInfo().isXa()) {
+                    // An XA session is not in a transaction outside of a branch.
+                    delivery.disposition(Accepted.getInstance());
+                    delivery.settle();
                 }
             } else {
                 delivery.disposition(Accepted.getInstance());

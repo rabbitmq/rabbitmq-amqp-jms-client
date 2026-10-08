@@ -33,6 +33,8 @@ import com.rabbitmq.client.jms.meta.JmsSessionId;
 import com.rabbitmq.client.jms.meta.JmsSessionInfo;
 import com.rabbitmq.client.jms.meta.JmsTransactionId;
 import com.rabbitmq.client.jms.meta.JmsTransactionInfo;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderUnsupportedOperationException;
 import com.rabbitmq.client.jms.provider.AsyncResult;
 import com.rabbitmq.client.jms.provider.ProviderConstants.ACK_TYPE;
 import com.rabbitmq.client.jms.provider.ProviderException;
@@ -271,6 +273,13 @@ public class AmqpSession extends AmqpAbstractResource<JmsSessionInfo, Session> i
 
     boolean isTransacted() {
         return getResourceInfo().isTransacted();
+    }
+
+    public void xa(JmsXaRequest xaRequest, AsyncResult request) throws Exception {
+        if (!getResourceInfo().isXa()) {
+            throw new ProviderUnsupportedOperationException("The session does not take part in XA transactions");
+        }
+        getTransactionContext().xa(xaRequest, request);
     }
 
     public boolean isTransactionInDoubt() {
