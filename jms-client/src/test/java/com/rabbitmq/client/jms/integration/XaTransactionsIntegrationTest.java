@@ -329,6 +329,44 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
         }
     }
 
+    @Test
+    @Timeout(20)
+    public void testEndOfSuspendedBranch() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid succeeded = new TestXid(1);
+            Xid failed = new TestXid(2);
+
+            JmsXAConnection connection = createXAConnection(testPeer);
+
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, succeeded, TXN_ID_1);
+            resource.start(succeeded, XAResource.TMNOFLAGS);
+            resource.end(succeeded, XAResource.TMSUSPEND);
+            assertXaError(XAException.XAER_PROTO, () -> resource.end(succeeded, XAResource.TMSUSPEND));
+            resource.end(succeeded, XAResource.TMSUCCESS);
+
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_1, new Accepted());
+            assertEquals(XAResource.XA_OK, resource.prepare(succeeded));
+
+            expectXaDeclare(testPeer, failed, TXN_ID_2);
+            resource.start(failed, XAResource.TMNOFLAGS);
+            resource.end(failed, XAResource.TMSUSPEND);
+            resource.end(failed, XAResource.TMFAIL);
+
+            testPeer.expectDischarge(TXN_ID_2, true);
+            assertXaError(XAException.XA_RBROLLBACK, () -> resource.prepare(failed));
+
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
     //----- Test support -----------------------------------------------------//
 
     private interface XaCall {
