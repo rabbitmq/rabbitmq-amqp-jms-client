@@ -105,6 +105,7 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
     private boolean useDaemonThread = false;
     private long sendTimeout = JmsConnectionInfo.DEFAULT_SEND_TIMEOUT;
     private long requestTimeout = JmsConnectionInfo.DEFAULT_REQUEST_TIMEOUT;
+    private long xaRequestTimeout = JmsConnectionInfo.DEFAULT_XA_REQUEST_TIMEOUT;
     private long closeTimeout = JmsConnectionInfo.DEFAULT_CLOSE_TIMEOUT;
     private long connectTimeout = JmsConnectionInfo.DEFAULT_CONNECT_TIMEOUT;
     private IdGenerator clientIdGenerator;
@@ -675,6 +676,14 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
 
     public void setRequestTimeout(long requestTimeout) {
         this.requestTimeout = requestTimeout;
+    }
+
+    public long getXaRequestTimeout() {
+        return xaRequestTimeout;
+    }
+
+    public void setXaRequestTimeout(long xaRequestTimeout) {
+        this.xaRequestTimeout = xaRequestTimeout;
     }
 
     public JmsPrefetchPolicy getPrefetchPolicy() {

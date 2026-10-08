@@ -464,17 +464,8 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
 
             @Override
             public boolean failureWhenOffline() {
-                // The branch of a session does not survive a new connection, so only the
-                // operations by xid are worth retrying.
-                switch (xaRequest.getType()) {
-                    case COMMIT:
-                    case ROLLBACK:
-                    case FORGET:
-                    case RECOVER:
-                        return false;
-                    default:
-                        return true;
-                }
+                // A transaction manager retries a failed XA operation, so it does not wait for a reconnect.
+                return true;
             }
 
             @Override

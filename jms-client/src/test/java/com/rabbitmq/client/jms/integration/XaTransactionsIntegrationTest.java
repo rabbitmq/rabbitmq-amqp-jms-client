@@ -407,6 +407,92 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
         }
     }
 
+    @Test
+    @Timeout(20)
+    public void testXaRequestsFailWhileOffline() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid xid = new TestXid(1);
+
+            testPeer.expectSaslAnonymous();
+            testPeer.expectOpen();
+            testPeer.expectBegin();
+            testPeer.expectBegin();
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, xid, TXN_ID_1);
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_1, new Accepted());
+            testPeer.dropAfterLastHandler();
+
+            JmsXAConnection connection = createFailoverXAConnection("failover.initialReconnectDelay=60000", testPeer);
+            CountDownLatch interrupted = new CountDownLatch(1);
+            connection.addConnectionListener(new JmsDefaultConnectionListener() {
+                @Override
+                public void onConnectionInterrupted(URI remoteURI) {
+                    interrupted.countDown();
+                }
+            });
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            resource.start(xid, XAResource.TMNOFLAGS);
+            resource.end(xid, XAResource.TMSUCCESS);
+            resource.prepare(xid);
+            assertTrue(interrupted.await(5, TimeUnit.SECONDS), "Should lose the connection");
+
+            assertXaError(XAException.XAER_RMFAIL, () -> resource.commit(xid, false));
+            assertXaError(XAException.XAER_RMFAIL, () -> resource.rollback(xid));
+            assertXaError(XAException.XAER_RMFAIL, () -> resource.forget(xid));
+            assertXaError(XAException.XAER_RMFAIL, () -> resource.recover(XAResource.TMSTARTRSCAN));
+
+            connection.close();
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testXaRequestsTimeOutWhenRequestTimeoutIsInfinite() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid late = new TestXid(1);
+            Xid notPrepared = new TestXid(2);
+            Xid prepared = new TestXid(3);
+
+            JmsXAConnection connection = createXAConnection(testPeer, "jms.xaRequestTimeout=500");
+
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            expectXaCoordinatorAttach(testPeer);
+            testPeer.expectTransfer(new ControlMatcher(DECLARE, xid(late)), nullValue(), false, true,
+                new Declared().setTxnId(TXN_ID_1), true, 0, 700);
+            assertXaError(XAException.XAER_RMFAIL, () -> resource.start(late, XAResource.TMNOFLAGS));
+
+            testPeer.expectSenderAttach();
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+            testPeer.expectTransfer(textMessage("outside"));
+            producer.send(session.createTextMessage("outside"));
+
+            expectXaDeclare(testPeer, notPrepared, TXN_ID_2);
+            resource.start(notPrepared, XAResource.TMNOFLAGS);
+            resource.end(notPrepared, XAResource.TMSUCCESS);
+            testPeer.expectTransfer(new ControlMatcher(XA_PREPARE, TXN_ID_2), nullValue(), false, false, null, false);
+            assertXaError(XAException.XAER_RMFAIL, () -> resource.prepare(notPrepared));
+
+            Binary txnId3 = new Binary(new byte[] { 9 });
+            expectXaDeclare(testPeer, prepared, txnId3);
+            expectXaControl(testPeer, XA_PREPARE, txnId3, new Accepted());
+            resource.start(prepared, XAResource.TMNOFLAGS);
+            resource.end(prepared, XAResource.TMSUCCESS);
+            resource.prepare(prepared);
+            testPeer.expectTransfer(new ControlMatcher(XA_COMMIT, xid(prepared)), nullValue(), false, false, null, false);
+            assertXaError(XAException.XA_RETRY, () -> resource.commit(prepared, false));
+
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
     //----- Test support -----------------------------------------------------//
 
     private interface XaCall {

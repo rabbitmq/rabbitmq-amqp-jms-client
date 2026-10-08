@@ -33,6 +33,7 @@ import javax.transaction.xa.XAException;
 
 import com.rabbitmq.client.jms.exceptions.JmsConnectionFailedException;
 import com.rabbitmq.client.jms.meta.JmsXaRequest;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderXaException;
 import com.rabbitmq.client.jms.exceptions.JmsExceptionSupport;
 import com.rabbitmq.client.jms.message.JmsInboundMessageDispatch;
@@ -907,7 +908,13 @@ public class JmsConnection implements AutoCloseable, Connection, TopicConnection
         requests.put(request, request);
         try {
             provider.xa(xaRequest, request);
-            request.sync();
+            if (getRequestTimeout() != JmsConnectionInfo.INFINITE) {
+                request.sync();
+            } else if (!request.sync(connectionInfo.getXaRequestTimeout(), TimeUnit.MILLISECONDS)) {
+                // Completes the request so that a late reply is ignored, unless it has just arrived.
+                request.onFailure(new ProviderOperationTimedOutException("Timed out waiting for " + xaRequest));
+                request.sync();
+            }
         } catch (ProviderXaException e) {
             throw xaException(e.getErrorCode(), e);
         } catch (Exception e) {
