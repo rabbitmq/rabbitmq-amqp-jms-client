@@ -111,10 +111,6 @@ public class JmsXAResource implements XAResource {
 
     @Override
     public synchronized void end(Xid xid, int flags) throws XAException {
-        Branch branch = current;
-        if (branch == null || !branch.key.equals(key(xid))) {
-            throw new XAException(XAException.XAER_PROTO);
-        }
         State next;
         switch (flags) {
             case TMSUCCESS:
@@ -128,6 +124,14 @@ public class JmsXAResource implements XAResource {
                 break;
             default:
                 throw new XAException(XAException.XAER_INVAL);
+        }
+        Branch branch = branches.get(key(xid));
+        if (branch != null && branch.state == State.SUSPENDED && next != State.SUSPENDED) {
+            branch.state = next;
+            return;
+        }
+        if (branch == null || branch != current) {
+            throw new XAException(XAException.XAER_PROTO);
         }
         // Dissociated first, so that a recovery during the request does not associate the session again.
         current = null;
