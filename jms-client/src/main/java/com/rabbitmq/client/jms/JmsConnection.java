@@ -29,7 +29,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
+import javax.transaction.xa.XAException;
+
 import com.rabbitmq.client.jms.exceptions.JmsConnectionFailedException;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderXaException;
 import com.rabbitmq.client.jms.exceptions.JmsExceptionSupport;
 import com.rabbitmq.client.jms.message.JmsInboundMessageDispatch;
 import com.rabbitmq.client.jms.message.JmsMessage;
@@ -576,7 +580,7 @@ public class JmsConnection implements AutoCloseable, Connection, TopicConnection
         connectionConsumers.put(consumerInfo.getId(), consumer);
     }
 
-    private void createJmsConnection() throws JMSException {
+    protected void createJmsConnection() throws JMSException {
         if (isConnected() || closed.get()) {
             return;
         }
@@ -872,6 +876,51 @@ public class JmsConnection implements AutoCloseable, Connection, TopicConnection
         } catch (Exception ioe) {
             throw JmsExceptionSupport.create(ioe);
         }
+    }
+
+    JmsXASession createXASessionInternal() throws JMSException {
+        checkClosedOrFailed();
+        createJmsConnection();
+        JmsXASession result = new JmsXASession(this, getNextSessionId());
+        if (started.get()) {
+            result.start();
+        }
+        return result;
+    }
+
+    /**
+     * Runs an operation on an XA branch.
+     *
+     * @param xaRequest
+     *        describes the operation.
+     *
+     * @throws XAException if the operation fails.
+     */
+    void xa(JmsXaRequest xaRequest) throws XAException {
+        try {
+            checkClosedOrFailed();
+        } catch (JMSException e) {
+            throw xaException(XAException.XAER_RMFAIL, e);
+        }
+
+        ProviderFuture request = provider.newProviderFuture(null);
+        requests.put(request, request);
+        try {
+            provider.xa(xaRequest, request);
+            request.sync();
+        } catch (ProviderXaException e) {
+            throw xaException(e.getErrorCode(), e);
+        } catch (Exception e) {
+            throw xaException(XAException.XAER_RMFAIL, e);
+        } finally {
+            requests.remove(request);
+        }
+    }
+
+    private static XAException xaException(int errorCode, Throwable cause) {
+        XAException result = new XAException(errorCode);
+        result.initCause(cause);
+        return result;
     }
 
     void recover(JmsSessionId sessionId) throws JMSException {

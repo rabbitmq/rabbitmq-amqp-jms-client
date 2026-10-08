@@ -143,13 +143,14 @@ public class JmsSession implements AutoCloseable, Session, QueueSession, TopicSe
         this.acknowledgementMode = acknowledgementMode;
 
         if (acknowledgementMode == SESSION_TRANSACTED) {
-            setTransactionContext(new JmsLocalTransactionContext(this));
+            setTransactionContext(createTransactionContext());
         } else {
             setTransactionContext(new JmsNoTxTransactionContext());
         }
 
         sessionInfo = new JmsSessionInfo(sessionId);
         sessionInfo.setAcknowledgementMode(acknowledgementMode);
+        sessionInfo.setXa(isXa());
         sessionInfo.setSendAcksAsync(connection.isForceAsyncAcks());
         sessionInfo.setMessageIDPolicy(connection.getMessageIDPolicy().copy());
         sessionInfo.setPrefetchPolicy(connection.getPrefetchPolicy().copy());
@@ -193,6 +194,23 @@ public class JmsSession implements AutoCloseable, Session, QueueSession, TopicSe
 
             throw e;
         }
+    }
+
+    /**
+     * Creates the transaction context of a transacted session. It is called by the
+     * constructor, so an override must not depend on the state of the subclass.
+     *
+     * @return the transaction context.
+     */
+    protected JmsTransactionContext createTransactionContext() {
+        return new JmsLocalTransactionContext(this);
+    }
+
+    /**
+     * @return whether the session takes part in XA transactions. It is called by the constructor.
+     */
+    protected boolean isXa() {
+        return false;
     }
 
     int acknowledgementMode() {

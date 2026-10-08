@@ -17,7 +17,14 @@
 package com.rabbitmq.client.jms.provider.amqp;
 
 import java.nio.BufferOverflowException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ScheduledFuture;
+
+import javax.transaction.xa.XAException;
+import javax.transaction.xa.Xid;
 
 import com.rabbitmq.client.jms.meta.JmsConnectionInfo;
 import com.rabbitmq.client.jms.meta.JmsSessionInfo;
@@ -31,6 +38,13 @@ import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutExce
 import com.rabbitmq.client.jms.provider.exceptions.ProviderTransactionInDoubtException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderTransactionRolledBackException;
 import org.apache.qpid.proton.amqp.Binary;
+import org.apache.qpid.proton.amqp.DescribedType;
+import org.apache.qpid.proton.amqp.Symbol;
+import org.apache.qpid.proton.amqp.messaging.Modified;
+import org.apache.qpid.proton.amqp.transaction.GlobalTxId;
+import org.apache.qpid.proton.amqp.transport.ErrorCondition;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderXaException;
 import org.apache.qpid.proton.amqp.messaging.AmqpValue;
 import org.apache.qpid.proton.amqp.messaging.Rejected;
 import org.apache.qpid.proton.amqp.transaction.Declare;
@@ -83,6 +97,18 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
                     Declared declared = (Declared) state;
                     txId.setProviderHint(declared.getTxnId());
                     pendingRequest.onSuccess();
+                } else if (state instanceof Rejected && context.getXaRequest() != null) {
+                    LOG.debug("Last XA request failed: {}", context.getXaRequest());
+                    pendingRequest.onFailure(toXaException(((Rejected) state).getError()));
+                } else if (state instanceof Modified && context.getXaRequest() != null
+                           && context.getXaRequest().getType() == JmsXaRequest.Type.RECOVER) {
+                    try {
+                        readRecovered((Modified) state, context.getXaRequest());
+                        pendingRequest.onSuccess();
+                    } catch (RuntimeException e) {
+                        pendingRequest.onFailure(new ProviderXaException(XAException.XAER_RMERR,
+                            "Unexpected reply to recover: " + e.getMessage(), e));
+                    }
                 } else if (state instanceof Rejected) {
                     LOG.debug("Last TX request failed: {}", txId);
                     Rejected rejected = (Rejected) state;
@@ -179,6 +205,208 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
         sendTxCommand(message);
     }
 
+    //----- XA ---------------------------------------------------------------//
+
+    private static final Symbol XA_XID = Symbol.valueOf("rabbitmq:xid");
+    private static final Symbol XA_ANN_XIDS = Symbol.valueOf("rabbitmq:xids");
+    private static final Symbol XA_ANN_MORE = Symbol.valueOf("rabbitmq:more");
+    private static final Symbol TXN_ROLLBACK = Symbol.valueOf("amqp:transaction:rollback");
+    private static final Symbol TXN_TIMEOUT = Symbol.valueOf("amqp:transaction:timeout");
+    private static final Symbol TXN_UNKNOWN_ID = Symbol.valueOf("amqp:transaction:unknown-id");
+    private static final Symbol XA_DUPLICATE_ID = Symbol.valueOf("rabbitmq:xa:duplicate-id");
+    private static final Symbol XA_PROTOCOL_ERROR = Symbol.valueOf("rabbitmq:xa:protocol-error");
+    private static final Symbol XA_HEURISTIC_ROLLBACK = Symbol.valueOf("rabbitmq:xa:heuristic-rollback");
+    private static final Symbol INVALID_FIELD = Symbol.valueOf("amqp:invalid-field");
+
+    /**
+     * Declares a transaction that is the branch of a global transaction.
+     */
+    public void xaDeclare(JmsTransactionId txId, Xid xid, JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        if (isClosed()) {
+            request.onFailure(new ProviderIllegalStateException("Cannot start new transaction: Coordinator remotely closed"));
+            return;
+        }
+
+        Declare declare = new Declare();
+        declare.setGlobalId(describedXid(xid));
+        sendXa(declare, txId, xaRequest, request, "Timed out waiting for declare of XA branch.");
+    }
+
+    /**
+     * Discharges a branch that has not been prepared, which is a one-phase commit or a rollback.
+     */
+    public void xaDischarge(Binary txnId, boolean fail, JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        if (isClosed()) {
+            request.onFailure(new ProviderXaException(XAException.XAER_RMFAIL, "Coordinator remotely closed"));
+            return;
+        }
+
+        Discharge discharge = new Discharge();
+        discharge.setFail(fail);
+        discharge.setTxnId(txnId);
+        sendXa(discharge, null, xaRequest, request, "Timed out waiting for discharge of XA branch.");
+    }
+
+    public void xaPrepare(Binary txnId, JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        xaControl("rabbitmq:xa-prepare", Arrays.asList(txnId), xaRequest, request);
+    }
+
+    public void xaCommit(Xid xid, JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        xaControl("rabbitmq:xa-commit", Arrays.asList(describedXid(xid)), xaRequest, request);
+    }
+
+    public void xaRollback(Xid xid, JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        xaControl("rabbitmq:xa-rollback", Arrays.asList(describedXid(xid)), xaRequest, request);
+    }
+
+    public void xaForget(Xid xid, JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        xaControl("rabbitmq:xa-forget", Arrays.asList(describedXid(xid)), xaRequest, request);
+    }
+
+    public void xaRecover(Xid startAfter, JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        List<Object> fields = new ArrayList<>();
+        if (startAfter != null) {
+            fields.add(describedXid(startAfter));
+        }
+        xaControl("rabbitmq:xa-recover", fields, xaRequest, request);
+    }
+
+    private void xaControl(String name, List<Object> fields, JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        if (isClosed()) {
+            request.onFailure(new ProviderXaException(XAException.XAER_RMFAIL, "Coordinator remotely closed"));
+            return;
+        }
+
+        sendXa(new DescribedValue(Symbol.valueOf(name), fields), null, xaRequest, request,
+            "Timed out waiting for " + name + ".");
+    }
+
+    private void sendXa(Object body, JmsTransactionId txId, JmsXaRequest xaRequest, AsyncResult request, String timeoutMessage) throws ProviderException {
+        Message message = Message.Factory.create();
+        message.setBody(new AmqpValue(body));
+
+        ScheduledFuture<?> timeout = scheduleTimeoutIfNeeded(timeoutMessage, request);
+        OperationContext context = new OperationContext(txId, request, timeout);
+        context.setXaRequest(xaRequest);
+
+        Delivery delivery = getEndpoint().delivery(tagGenerator.getNextTag());
+        delivery.setContext(context);
+
+        sendTxCommand(message);
+    }
+
+    private static DescribedXid describedXid(Xid xid) {
+        return new DescribedXid(Arrays.asList(xid.getFormatId(),
+            new Binary(xid.getGlobalTransactionId()), new Binary(xid.getBranchQualifier())));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void readRecovered(Modified modified, JmsXaRequest xaRequest) {
+        Map<Symbol, Object> annotations = modified.getMessageAnnotations();
+        List<Xid> xids = new ArrayList<>();
+        for (Object entry : (List<Object>) annotations.get(XA_ANN_XIDS)) {
+            List<Object> fields = (List<Object>) entry;
+            xids.add(new BranchId((Integer) fields.get(0), ((Binary) fields.get(1)).getArray(), ((Binary) fields.get(2)).getArray()));
+        }
+        Object more = annotations.get(XA_ANN_MORE);
+        xaRequest.setRecovered(xids, Boolean.TRUE.equals(more));
+    }
+
+    static ProviderXaException toXaException(ErrorCondition error) {
+        Symbol condition = error == null ? null : error.getCondition();
+        String description = error == null ? "" : String.valueOf(error.getDescription());
+        int code;
+        if (TXN_ROLLBACK.equals(condition)) {
+            code = XAException.XA_RBROLLBACK;
+        } else if (TXN_TIMEOUT.equals(condition)) {
+            code = XAException.XA_RBTIMEOUT;
+        } else if (TXN_UNKNOWN_ID.equals(condition)) {
+            code = XAException.XAER_NOTA;
+        } else if (XA_DUPLICATE_ID.equals(condition)) {
+            code = XAException.XAER_DUPID;
+        } else if (XA_PROTOCOL_ERROR.equals(condition)) {
+            code = XAException.XAER_PROTO;
+        } else if (XA_HEURISTIC_ROLLBACK.equals(condition)) {
+            code = XAException.XA_HEURRB;
+        } else if (INVALID_FIELD.equals(condition)) {
+            code = XAException.XAER_INVAL;
+        } else {
+            code = XAException.XAER_RMERR;
+        }
+        return new ProviderXaException(code, condition + ": " + description);
+    }
+
+    /** The branch identifier, which is the global id of a declare. */
+    private static final class DescribedXid implements DescribedType, GlobalTxId {
+
+        private final List<Object> fields;
+
+        private DescribedXid(List<Object> fields) {
+            this.fields = fields;
+        }
+
+        @Override
+        public Object getDescriptor() {
+            return XA_XID;
+        }
+
+        @Override
+        public Object getDescribed() {
+            return fields;
+        }
+    }
+
+    /** A described value that the AMQP codec encodes as it is. */
+    private static final class DescribedValue implements DescribedType {
+
+        private final Symbol descriptor;
+        private final Object described;
+
+        private DescribedValue(Symbol descriptor, Object described) {
+            this.descriptor = descriptor;
+            this.described = described;
+        }
+
+        @Override
+        public Object getDescriptor() {
+            return descriptor;
+        }
+
+        @Override
+        public Object getDescribed() {
+            return described;
+        }
+    }
+
+    /** An XA branch identifier that was received from the broker. */
+    static final class BranchId implements Xid {
+
+        private final int formatId;
+        private final byte[] globalTransactionId;
+        private final byte[] branchQualifier;
+
+        BranchId(int formatId, byte[] globalTransactionId, byte[] branchQualifier) {
+            this.formatId = formatId;
+            this.globalTransactionId = globalTransactionId;
+            this.branchQualifier = branchQualifier;
+        }
+
+        @Override
+        public int getFormatId() {
+            return formatId;
+        }
+
+        @Override
+        public byte[] getGlobalTransactionId() {
+            return globalTransactionId;
+        }
+
+        @Override
+        public byte[] getBranchQualifier() {
+            return branchQualifier;
+        }
+    }
+
     //----- Base class overrides ---------------------------------------------//
 
     @Override
@@ -221,6 +449,7 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
         private final AsyncResult request;
         private final ScheduledFuture<?> timeout;
         private final JmsTransactionId transactionId;
+        private JmsXaRequest xaRequest;
 
         public OperationContext(JmsTransactionId transactionId, AsyncResult request, ScheduledFuture<?> timeout) {
             this.transactionId = transactionId;
@@ -230,6 +459,14 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
 
         public JmsTransactionId getTransactionId() {
             return transactionId;
+        }
+
+        public JmsXaRequest getXaRequest() {
+            return xaRequest;
+        }
+
+        public void setXaRequest(JmsXaRequest xaRequest) {
+            this.xaRequest = xaRequest;
         }
 
         public AsyncResult getRequest() {
