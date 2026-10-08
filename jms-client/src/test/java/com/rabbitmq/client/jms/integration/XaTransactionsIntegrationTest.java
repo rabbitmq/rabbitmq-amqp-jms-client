@@ -19,6 +19,7 @@ package com.rabbitmq.client.jms.integration;
 import static org.hamcrest.Matchers.arrayContaining;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -27,7 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -50,6 +53,7 @@ import com.rabbitmq.client.jms.test.testpeer.ListDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.TestAmqpPeer;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
+import com.rabbitmq.client.jms.test.testpeer.describedtypes.Modified;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Released;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.matchers.AcceptedMatcher;
@@ -82,6 +86,8 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
     private static final Symbol XA_PREPARE = Symbol.valueOf("rabbitmq:xa-prepare");
     private static final Symbol XA_COMMIT = Symbol.valueOf("rabbitmq:xa-commit");
     private static final Symbol XA_RECOVER = Symbol.valueOf("rabbitmq:xa-recover");
+    private static final Symbol XIDS = Symbol.valueOf("x-opt-rabbitmq-xids");
+    private static final Symbol MORE = Symbol.valueOf("x-opt-rabbitmq-more");
 
     private static final Binary TXN_ID_1 = new Binary(new byte[] { 1, 2, 3, 4 });
     private static final Binary TXN_ID_2 = new Binary(new byte[] { 5, 6, 7, 8 });
@@ -493,6 +499,39 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
         }
     }
 
+    @Test
+    @Timeout(20)
+    public void testRecoverReadsEveryPage() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid first = new TestXid(1);
+            Xid second = new TestXid(2);
+
+            JmsXAConnection connection = createXAConnection(testPeer);
+
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            expectXaCoordinatorAttach(testPeer);
+            testPeer.expectTransfer(new ControlMatcher(XA_RECOVER), nullValue(), recovered(XIDS, MORE, first, true), true);
+            expectXaControl(testPeer, XA_RECOVER, xid(first), recovered(XIDS, MORE, second, false));
+            Xid[] xids = resource.recover(XAResource.TMSTARTRSCAN);
+            assertEquals(2, xids.length);
+            assertXidEquals(first, xids[0]);
+            assertXidEquals(second, xids[1]);
+            assertEquals(0, resource.recover(XAResource.TMENDRSCAN).length);
+
+            Modified reservedKeys = recovered(Symbol.valueOf("rabbitmq:xids"), Symbol.valueOf("rabbitmq:more"), first, false);
+            testPeer.expectTransfer(new ControlMatcher(XA_RECOVER), nullValue(), reservedKeys, true);
+            assertXaError(XAException.XAER_RMERR, () -> resource.recover(XAResource.TMSTARTRSCAN));
+
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
     //----- Test support -----------------------------------------------------//
 
     private interface XaCall {
@@ -555,8 +594,25 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
     }
 
     private static List<Object> xid(Xid xid) {
-        return Arrays.asList(XID, Arrays.asList(xid.getFormatId(),
-            new Binary(xid.getGlobalTransactionId()), new Binary(xid.getBranchQualifier())));
+        return Arrays.asList(XID, xidFields(xid));
+    }
+
+    private static List<Object> xidFields(Xid xid) {
+        return Arrays.asList(xid.getFormatId(),
+            new Binary(xid.getGlobalTransactionId()), new Binary(xid.getBranchQualifier()));
+    }
+
+    private static Modified recovered(Symbol xidsKey, Symbol moreKey, Xid xid, boolean more) {
+        Map<Symbol, Object> annotations = new HashMap<>();
+        annotations.put(xidsKey, Arrays.asList(xidFields(xid)));
+        annotations.put(moreKey, more);
+        return new Modified().setMessageAnnotations(annotations);
+    }
+
+    private static void assertXidEquals(Xid expected, Xid actual) {
+        assertEquals(expected.getFormatId(), actual.getFormatId());
+        assertArrayEquals(expected.getGlobalTransactionId(), actual.getGlobalTransactionId());
+        assertArrayEquals(expected.getBranchQualifier(), actual.getBranchQualifier());
     }
 
     private static TransferPayloadCompositeMatcher textMessage(String text) {
