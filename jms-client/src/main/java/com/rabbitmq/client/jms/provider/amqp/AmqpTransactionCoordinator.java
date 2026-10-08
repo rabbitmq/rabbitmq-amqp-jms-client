@@ -199,8 +199,8 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
     //----- XA ---------------------------------------------------------------//
 
     private static final Symbol XA_XID = Symbol.valueOf("rabbitmq:xid");
-    private static final Symbol XA_ANN_XIDS = Symbol.valueOf("rabbitmq:xids");
-    private static final Symbol XA_ANN_MORE = Symbol.valueOf("rabbitmq:more");
+    private static final Symbol XA_ANN_XIDS = Symbol.valueOf("x-opt-rabbitmq-xids");
+    private static final Symbol XA_ANN_MORE = Symbol.valueOf("x-opt-rabbitmq-more");
     private static final Symbol TXN_ROLLBACK = Symbol.valueOf("amqp:transaction:rollback");
     private static final Symbol TXN_TIMEOUT = Symbol.valueOf("amqp:transaction:timeout");
     private static final Symbol TXN_UNKNOWN_ID = Symbol.valueOf("amqp:transaction:unknown-id");
