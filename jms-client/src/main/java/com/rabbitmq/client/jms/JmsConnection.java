@@ -581,7 +581,7 @@ public class JmsConnection implements AutoCloseable, Connection, TopicConnection
         connectionConsumers.put(consumerInfo.getId(), consumer);
     }
 
-    protected void createJmsConnection() throws JMSException {
+    private void createJmsConnection() throws JMSException {
         if (isConnected() || closed.get()) {
             return;
         }

@@ -20,7 +20,6 @@ import java.util.HashMap;
 import java.util.Map;
 
 import javax.transaction.xa.XAException;
-import javax.transaction.xa.Xid;
 
 import com.rabbitmq.client.jms.meta.JmsConsumerId;
 import com.rabbitmq.client.jms.meta.JmsProducerId;
@@ -199,25 +198,8 @@ public class AmqpTransactionContext implements AmqpResourceParent {
 
     //----- XA ---------------------------------------------------------------//
 
-    private final Map<String, XaBranch> branches = new HashMap<>();
+    private final Map<String, JmsTransactionId> xaBranches = new HashMap<>();
     private boolean inUnknownBranch;
-
-    /**
-     * A branch that was started on this session, and has not been committed or rolled back.
-     */
-    private static final class XaBranch {
-
-        private final JmsTransactionId txId;
-        private boolean prepared;
-
-        private XaBranch(JmsTransactionId txId) {
-            this.txId = txId;
-        }
-
-        private Binary amqpTransactionId() {
-            return (Binary) txId.getProviderHint();
-        }
-    }
 
     private interface XaAction {
         void run() throws ProviderException;
@@ -228,6 +210,9 @@ public class AmqpTransactionContext implements AmqpResourceParent {
      * has been started and not ended, which means that the work of the session is not
      * transactional in between.
      *
+     * The JMS XA resource checks the state of the branches. This context only keeps the
+     * transactions of the branches of the session that have not been prepared.
+     *
      * @param xaRequest
      *        describes the operation.
      * @param result
@@ -236,18 +221,17 @@ public class AmqpTransactionContext implements AmqpResourceParent {
      * @throws ProviderException if the operation cannot be started.
      */
     public void xa(final JmsXaRequest xaRequest, final AsyncResult result) throws ProviderException {
-        final Xid xid = xaRequest.getXid();
-        final String key = xid == null ? null : branchKey(xid);
-        final XaBranch branch = key == null ? null : branches.get(key);
+        final String key = xaRequest.getKey();
+        final JmsTransactionId txId = key == null ? null : xaBranches.get(key);
 
         switch (xaRequest.getType()) {
             case START:
-                xaStart(xaRequest, key, result);
+                xaStart(xaRequest, result);
                 break;
             case RESUME:
                 // After a reconnect the branch is unknown, so the work of the session is dropped until it ends.
-                setCurrent(branch == null ? null : branch.txId);
-                inUnknownBranch = branch == null;
+                setCurrent(txId);
+                inUnknownBranch = txId == null;
                 result.onSuccess();
                 break;
             case END:
@@ -255,67 +239,43 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                 result.onSuccess();
                 break;
             case PREPARE:
-                if (branch == null) {
+                if (txId == null) {
                     result.onFailure(new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest));
                     break;
                 }
                 preCommit();
-                withCoordinator(result, () -> coordinator.xaPrepare(branch.amqpTransactionId(), xaRequest,
-                    new XaCompletion(result) {
-                        @Override
-                        public void onSuccess() {
-                            branch.prepared = true;
-                            // The deliveries are settled now, because another session can complete the branch.
-                            postCommit();
-                            result.onSuccess();
-                        }
-
-                        @Override
-                        public void onFailure(ProviderException failure) {
-                            branches.remove(key);
-                            postCommit();
-                            result.onFailure(failure);
-                        }
-                    }));
+                withCoordinator(result, () -> coordinator.xaPrepare(amqpTransactionId(txId), xaRequest,
+                    new BranchCompletion(key, result)));
                 break;
             case COMMIT_ONE_PHASE:
-                if (branch == null || branch.prepared) {
+                if (txId == null) {
                     result.onFailure(new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest));
                     break;
                 }
                 preCommit();
-                dischargeBranch(branch, key, false, xaRequest, result);
+                withCoordinator(result, () -> coordinator.xaDischarge(amqpTransactionId(txId), false, xaRequest,
+                    new BranchCompletion(key, result)));
                 break;
             case ROLLBACK:
-                if (branch != null && !branch.prepared) {
-                    if (branch.txId.equals(current)) {
-                        setCurrent(null);
-                    }
-                    preRollback();
-                    dischargeBranch(branch, key, true, xaRequest, result);
-                } else {
-                    withCoordinator(result, () -> coordinator.xaRollback(xid, xaRequest,
-                        new XaCompletion(result) {
-                            @Override
-                            public void onSuccess() {
-                                branches.remove(key);
-                                result.onSuccess();
-                            }
-                        }));
+                if (txId == null) {
+                    withCoordinator(result, () -> coordinator.xaRollback(xaRequest.getXid(), xaRequest,
+                        new XaCompletion(result)));
+                    break;
                 }
+                if (txId.equals(current)) {
+                    setCurrent(null);
+                }
+                preRollback();
+                withCoordinator(result, () -> coordinator.xaDischarge(amqpTransactionId(txId), true, xaRequest,
+                    new BranchCompletion(key, result)));
                 break;
             case COMMIT:
-                withCoordinator(result, () -> coordinator.xaCommit(xid, xaRequest,
-                    new XaCompletion(result) {
-                        @Override
-                        public void onSuccess() {
-                            branches.remove(key);
-                            result.onSuccess();
-                        }
-                    }));
+                withCoordinator(result, () -> coordinator.xaCommit(xaRequest.getXid(), xaRequest,
+                    new XaCompletion(result)));
                 break;
             case FORGET:
-                withCoordinator(result, () -> coordinator.xaForget(xid, xaRequest, new XaCompletion(result)));
+                withCoordinator(result, () -> coordinator.xaForget(xaRequest.getXid(), xaRequest,
+                    new XaCompletion(result)));
                 break;
             case RECOVER:
                 withCoordinator(result, () -> coordinator.xaRecover(xaRequest.getStartAfter(), xaRequest,
@@ -326,55 +286,23 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         }
     }
 
-    private void xaStart(final JmsXaRequest xaRequest, final String key, final AsyncResult result) throws ProviderException {
-        if (current != null || branches.containsKey(key)) {
-            result.onFailure(new ProviderXaException(
-                current != null ? XAException.XAER_PROTO : XAException.XAER_DUPID,
-                "Cannot start a branch: " + xaRequest));
-            return;
-        }
-
+    private void xaStart(final JmsXaRequest xaRequest, final AsyncResult result) {
         final JmsTransactionId txId = xaRequest.getTransactionId();
         withCoordinator(result, () -> coordinator.xaDeclare(txId, xaRequest.getXid(), xaRequest, new XaCompletion(result) {
             @Override
             public void onSuccess() {
                 // A reply after the request has timed out does not associate the session.
-                if (result.isComplete()) {
-                    return;
+                if (!result.isComplete()) {
+                    xaBranches.put(xaRequest.getKey(), txId);
+                    setCurrent(txId);
+                    super.onSuccess();
                 }
-                branches.put(key, new XaBranch(txId));
-                setCurrent(txId);
-                result.onSuccess();
-            }
-
-            @Override
-            public boolean isComplete() {
-                return current != null;
             }
         }));
     }
 
-    /**
-     * Commits or rolls back a branch of this session that has not been prepared.
-     */
-    private void dischargeBranch(final XaBranch branch, final String key, boolean fail, JmsXaRequest xaRequest, final AsyncResult result) {
-        withCoordinator(result, () -> coordinator.xaDischarge(branch.amqpTransactionId(), fail, xaRequest,
-            new XaCompletion(result) {
-                @Override
-                public void onSuccess() {
-                    branches.remove(key);
-                    // The broker returns the messages of a branch that rolled back to the queue.
-                    postCommit();
-                    result.onSuccess();
-                }
-
-                @Override
-                public void onFailure(ProviderException failure) {
-                    branches.remove(key);
-                    postCommit();
-                    result.onFailure(failure);
-                }
-            }));
+    private static Binary amqpTransactionId(JmsTransactionId txId) {
+        return (Binary) txId.getProviderHint();
     }
 
     private void setCurrent(JmsTransactionId txId) {
@@ -458,9 +386,36 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         }
     }
 
-    private static String branchKey(Xid xid) {
-        return xid.getFormatId() + ":" + java.util.Base64.getEncoder().encodeToString(xid.getGlobalTransactionId())
-            + ":" + java.util.Base64.getEncoder().encodeToString(xid.getBranchQualifier());
+    /**
+     * Ends the transaction of a branch of this session that has not been prepared.
+     */
+    private final class BranchCompletion extends XaCompletion {
+
+        private final String key;
+
+        private BranchCompletion(String key, AsyncResult request) {
+            super(request);
+            this.key = key;
+        }
+
+        @Override
+        public void onSuccess() {
+            endBranch();
+            super.onSuccess();
+        }
+
+        @Override
+        public void onFailure(ProviderException result) {
+            endBranch();
+            super.onFailure(result);
+        }
+
+        private void endBranch() {
+            xaBranches.remove(key);
+            // Another session can complete a prepared branch, and the broker returns the
+            // messages of a branch that rolled back to the queue, so the deliveries are settled.
+            postCommit();
+        }
     }
 
     //----- Context utility methods ------------------------------------------//

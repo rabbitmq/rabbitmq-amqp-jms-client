@@ -29,7 +29,7 @@ public final class JmsXaRequest {
     public enum Type {
         /** Starts a new branch. */
         START,
-        /** Associates the session with a branch that was ended with a suspend again. */
+        /** Associates the session with a branch that it has started before. */
         RESUME,
         /** Dissociates the session from its branch. */
         END,
@@ -44,15 +44,17 @@ public final class JmsXaRequest {
     private final Type type;
     private final JmsSessionId sessionId;
     private final Xid xid;
+    private final String key;
     private JmsTransactionId transactionId;
     private Xid startAfter;
     private final List<Xid> recovered = new ArrayList<>();
     private boolean more;
 
-    public JmsXaRequest(Type type, JmsSessionId sessionId, Xid xid) {
+    public JmsXaRequest(Type type, JmsSessionId sessionId, Xid xid, String key) {
         this.type = type;
         this.sessionId = sessionId;
         this.xid = xid;
+        this.key = key;
     }
 
     public Type getType() {
@@ -83,6 +85,14 @@ public final class JmsXaRequest {
      */
     public Xid getXid() {
         return xid;
+    }
+
+    /**
+     * @return the key that identifies the branch within the connection, or <code>null</code>
+     *         for a request that does not refer to one
+     */
+    public String getKey() {
+        return key;
     }
 
     /**

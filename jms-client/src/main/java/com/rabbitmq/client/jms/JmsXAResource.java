@@ -36,9 +36,9 @@ import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutExce
 /**
  * The resource that a transaction manager uses to control the branch of a session.
  *
- * A session is associated with at most one branch at a time. Preparing, committing and
- * rolling back by xid work on any session of the same user, which a transaction manager
- * uses for recovery.
+ * A session is associated with at most one branch at a time. Committing, rolling back
+ * and forgetting a prepared branch work on any session in the virtual host, which a
+ * transaction manager uses for recovery.
  */
 public class JmsXAResource implements XAResource {
 
@@ -85,9 +85,7 @@ public class JmsXAResource implements XAResource {
                 }
                 // Read before the request, so that an interruption during the request loses the branch.
                 long interruptionsAtStart = interruptions.get();
-                JmsXaRequest start = new JmsXaRequest(Type.START, session.getSessionId(), xid)
-                    .setTransactionId(connection.getNextTransactionId());
-                connection.xa(start);
+                connection.xa(request(Type.START, xid).setTransactionId(connection.getNextTransactionId()));
                 branch = new Branch(xid, key, interruptionsAtStart);
                 branches.put(key, branch);
                 break;
@@ -99,14 +97,13 @@ public class JmsXAResource implements XAResource {
                 if (branch == null || (branch.state != State.SUSPENDED && branch.state != State.ENDED)) {
                     throw new XAException(XAException.XAER_NOTA);
                 }
-                connection.xa(new JmsXaRequest(Type.RESUME, session.getSessionId(), xid));
+                connection.xa(request(Type.RESUME, xid));
                 break;
             default:
                 throw new XAException(XAException.XAER_INVAL);
         }
         branch.state = State.ACTIVE;
         current = branch;
-        context().setInBranch(true);
     }
 
     @Override
@@ -135,13 +132,11 @@ public class JmsXAResource implements XAResource {
         }
         // Dissociated first, so that a recovery during the request does not associate the session again.
         current = null;
-        context().setInBranch(false);
         try {
-            connection.xa(new JmsXaRequest(Type.END, session.getSessionId(), xid));
+            connection.xa(request(Type.END, xid));
         } catch (XAException e) {
             if (!isLost(branch)) {
                 current = branch;
-                context().setInBranch(true);
                 throw e;
             }
         }
@@ -166,7 +161,7 @@ public class JmsXAResource implements XAResource {
             throw new XAException(XAException.XA_RBROLLBACK);
         }
         try {
-            connection.xa(new JmsXaRequest(Type.PREPARE, session.getSessionId(), xid));
+            connection.xa(request(Type.PREPARE, xid));
         } catch (XAException e) {
             branches.remove(branch.key);
             throw e;
@@ -195,7 +190,7 @@ public class JmsXAResource implements XAResource {
                 throw new XAException(XAException.XA_RBROLLBACK);
             }
             try {
-                connection.xa(new JmsXaRequest(Type.COMMIT_ONE_PHASE, session.getSessionId(), xid));
+                connection.xa(request(Type.COMMIT_ONE_PHASE, xid));
             } finally {
                 branches.remove(key);
             }
@@ -204,7 +199,7 @@ public class JmsXAResource implements XAResource {
                 throw new XAException(XAException.XAER_PROTO);
             }
             try {
-                connection.xa(new JmsXaRequest(Type.COMMIT, session.getSessionId(), xid));
+                connection.xa(request(Type.COMMIT, xid));
             } catch (XAException e) {
                 XAException failure = preparedCommitFailure(e);
                 if (failure.errorCode == XAException.XAER_NOTA || failure.errorCode == XAException.XA_HEURRB) {
@@ -226,21 +221,20 @@ public class JmsXAResource implements XAResource {
         boolean associated = branch != null && branch == current;
         if (associated) {
             current = null;
-            context().setInBranch(false);
         }
         if (branch != null && isLost(branch)) {
             branches.remove(key);
             if (associated) {
                 // A recovery of the connection may have associated the session with the branch again.
                 try {
-                    connection.xa(new JmsXaRequest(Type.END, session.getSessionId(), xid));
+                    connection.xa(request(Type.END, xid));
                 } catch (XAException ignored) {
                 }
             }
             return;
         }
         try {
-            connection.xa(new JmsXaRequest(Type.ROLLBACK, session.getSessionId(), xid));
+            connection.xa(request(Type.ROLLBACK, xid));
         } catch (XAException e) {
             // A branch that is not open on this session is rolled back by its xid.
             throw branch == null || branch.state == State.PREPARED ? preparedRollbackFailure(e) : e;
@@ -293,7 +287,7 @@ public class JmsXAResource implements XAResource {
 
     @Override
     public void forget(Xid xid) throws XAException {
-        connection.xa(new JmsXaRequest(Type.FORGET, session.getSessionId(), xid));
+        connection.xa(request(Type.FORGET, xid));
     }
 
     @Override
@@ -305,7 +299,7 @@ public class JmsXAResource implements XAResource {
         Xid startAfter = null;
         boolean more = true;
         while (more) {
-            JmsXaRequest request = new JmsXaRequest(Type.RECOVER, session.getSessionId(), null)
+            JmsXaRequest request = new JmsXaRequest(Type.RECOVER, session.getSessionId(), null, null)
                 .setStartAfter(startAfter);
             connection.xa(request);
             List<Xid> page = request.getRecovered();
@@ -342,6 +336,10 @@ public class JmsXAResource implements XAResource {
             && (branch.interruptions != interruptions.get() || session.isClosed());
     }
 
+    boolean isAssociated() {
+        return current != null;
+    }
+
     boolean isAssociatedWithLostBranch() {
         Branch branch = current;
         return branch != null && isLost(branch);
@@ -354,14 +352,14 @@ public class JmsXAResource implements XAResource {
     void onConnectionRecovery(Provider provider) throws Exception {
         Branch branch = current;
         if (branch != null) {
-            ProviderFuture request = provider.newProviderFuture();
-            provider.xa(new JmsXaRequest(Type.RESUME, session.getSessionId(), branch.xid), request);
-            request.sync();
+            ProviderFuture future = provider.newProviderFuture();
+            provider.xa(request(Type.RESUME, branch.xid), future);
+            future.sync();
         }
     }
 
-    private JmsXATransactionContext context() {
-        return (JmsXATransactionContext) session.getTransactionContext();
+    private JmsXaRequest request(Type type, Xid xid) {
+        return new JmsXaRequest(type, session.getSessionId(), xid, key(xid));
     }
 
     private static String key(Xid xid) {
