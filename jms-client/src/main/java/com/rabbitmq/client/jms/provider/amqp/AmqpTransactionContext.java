@@ -51,6 +51,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     private static final Logger LOG = LoggerFactory.getLogger(AmqpTransactionContext.class);
 
     private final AmqpSession session;
+    private final JmsSessionInfo resourceInfo;
     private final Map<JmsConsumerId, AmqpConsumer> txConsumers = new HashMap<>();
     private final Map<JmsProducerId, AmqpProducer> txProducers = new HashMap<>();
 
@@ -69,6 +70,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
      */
     public AmqpTransactionContext(AmqpSession session, JmsSessionInfo resourceInfo) {
         this.session = session;
+        this.resourceInfo = resourceInfo;
     }
 
     public void begin(final JmsTransactionId txId, final AsyncResult request) throws ProviderException {
@@ -389,7 +391,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     private void withCoordinator(final AsyncResult request, final XaAction action) {
         if (coordinator == null || coordinator.isClosed()) {
             AmqpTransactionCoordinatorBuilder builder =
-                new AmqpTransactionCoordinatorBuilder(this, session.getResourceInfo());
+                new AmqpTransactionCoordinatorBuilder(this, resourceInfo);
             builder.buildResource(new AsyncResult() {
 
                 @Override

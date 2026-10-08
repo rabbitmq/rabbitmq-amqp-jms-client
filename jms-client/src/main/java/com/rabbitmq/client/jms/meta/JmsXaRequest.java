@@ -59,6 +59,21 @@ public final class JmsXaRequest {
         return type;
     }
 
+    /**
+     * @return whether any session of the connection can run the operation
+     */
+    public boolean runsOnAnySession() {
+        switch (type) {
+            case COMMIT:
+            case ROLLBACK:
+            case FORGET:
+            case RECOVER:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     public JmsSessionId getSessionId() {
         return sessionId;
     }

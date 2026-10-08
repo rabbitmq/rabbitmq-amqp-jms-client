@@ -330,10 +330,12 @@ public class JmsXAResource implements XAResource {
     }
 
     /**
-     * The broker rolls back a branch that has not been prepared when the connection is lost.
+     * The broker rolls back a branch that has not been prepared when its session ends or the
+     * connection is lost.
      */
     private boolean isLost(Branch branch) {
-        return branch.state != State.PREPARED && branch.interruptions != interruptions.get();
+        return branch.state != State.PREPARED
+            && (branch.interruptions != interruptions.get() || session.isClosed());
     }
 
     boolean isAssociatedWithLostBranch() {
