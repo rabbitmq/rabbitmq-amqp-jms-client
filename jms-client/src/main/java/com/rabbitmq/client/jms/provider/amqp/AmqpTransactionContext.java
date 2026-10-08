@@ -338,6 +338,10 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         withCoordinator(result, () -> coordinator.xaDeclare(txId, xaRequest.getXid(), xaRequest, new XaCompletion(result) {
             @Override
             public void onSuccess() {
+                // A reply after the request has timed out does not associate the session.
+                if (result.isComplete()) {
+                    return;
+                }
                 branches.put(key, new XaBranch(txId));
                 setCurrent(txId);
                 result.onSuccess();
