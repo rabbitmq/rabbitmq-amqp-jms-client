@@ -20,6 +20,7 @@ import javax.transaction.xa.XAResource;
 
 import jakarta.jms.JMSException;
 import jakarta.jms.Session;
+import jakarta.jms.TransactionInProgressException;
 import jakarta.jms.XASession;
 
 import com.rabbitmq.client.jms.meta.JmsSessionId;
@@ -58,5 +59,17 @@ public class JmsXASession extends JmsSession implements XASession {
     public boolean getTransacted() throws JMSException {
         checkClosed();
         return true;
+    }
+
+    @Override
+    public void commit() throws JMSException {
+        checkClosed();
+        throw new TransactionInProgressException("A session of an XA connection cannot commit, the transaction manager does");
+    }
+
+    @Override
+    public void rollback() throws JMSException {
+        checkClosed();
+        throw new TransactionInProgressException("A session of an XA connection cannot roll back, the transaction manager does");
     }
 }

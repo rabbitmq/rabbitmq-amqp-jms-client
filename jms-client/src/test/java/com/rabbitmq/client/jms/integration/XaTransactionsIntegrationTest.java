@@ -36,18 +36,21 @@ import javax.transaction.xa.Xid;
 
 import jakarta.jms.MessageConsumer;
 import jakarta.jms.MessageProducer;
+import jakarta.jms.TransactionInProgressException;
 import jakarta.jms.XASession;
 
 import com.rabbitmq.client.jms.JmsConnection;
 import com.rabbitmq.client.jms.JmsConnectionFactory;
 import com.rabbitmq.client.jms.JmsDefaultConnectionListener;
 import com.rabbitmq.client.jms.JmsXAConnection;
+import com.rabbitmq.client.jms.message.JmsInboundMessageDispatch;
 import com.rabbitmq.client.jms.test.QpidJmsTestCase;
 import com.rabbitmq.client.jms.test.testpeer.ListDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.TestAmqpPeer;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
+import com.rabbitmq.client.jms.test.testpeer.matchers.AcceptedMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.TransactionalStateMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessageAnnotationsSectionMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessageHeaderSectionMatcher;
@@ -76,6 +79,8 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
 
     private static final Binary TXN_ID_1 = new Binary(new byte[] { 1, 2, 3, 4 });
     private static final Binary TXN_ID_2 = new Binary(new byte[] { 5, 6, 7, 8 });
+
+    private final IntegrationTestFixture testFixture = new IntegrationTestFixture();
 
     @Test
     @Timeout(20)
@@ -228,6 +233,50 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
         }
     }
 
+    @Test
+    @Timeout(20)
+    public void testSessionRollbackAndCommitFailWithoutSideEffects() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid xid = new TestXid(1);
+
+            JmsXAConnection connection = createXAConnection(testPeer);
+            CountDownLatch prefetched = new CountDownLatch(1);
+            connection.addConnectionListener(new JmsDefaultConnectionListener() {
+                @Override
+                public void onInboundMessage(JmsInboundMessageDispatch envelope) {
+                    prefetched.countDown();
+                }
+            });
+            connection.start();
+
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            testPeer.expectReceiverAttach();
+            testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), 1);
+            MessageConsumer consumer = session.createConsumer(session.createQueue("myQueue"));
+            assertTrue(prefetched.await(5, TimeUnit.SECONDS), "Should have prefetched the message");
+
+            testPeer.expectCoordinatorAttach();
+            expectXaDeclare(testPeer, xid, TXN_ID_1);
+            resource.start(xid, XAResource.TMNOFLAGS);
+
+            assertThrows(TransactionInProgressException.class, session::rollback);
+            assertThrows(TransactionInProgressException.class, session::commit);
+
+            TransactionalStateMatcher accepted = new TransactionalStateMatcher()
+                .withTxnId(equalTo(TXN_ID_1)).withOutcome(new AcceptedMatcher());
+            testPeer.expectDisposition(false, accepted);
+            assertNotNull(consumer.receiveNoWait());
+
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
     //----- Test support -----------------------------------------------------//
 
     private interface XaCall {
@@ -237,6 +286,21 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
     private static void assertXaError(int errorCode, XaCall call) {
         XAException failure = assertThrows(XAException.class, call::run);
         assertEquals(errorCode, failure.errorCode);
+    }
+
+    private JmsXAConnection createXAConnection(TestAmqpPeer peer) throws Exception {
+        return createXAConnection(peer, null);
+    }
+
+    private JmsXAConnection createXAConnection(TestAmqpPeer peer, String options) throws Exception {
+        peer.expectSaslPlain("guest", "guest");
+        peer.expectOpen();
+        peer.expectBegin();
+
+        String uri = testFixture.buildURI(peer, false, options);
+        JmsXAConnection connection = (JmsXAConnection) new JmsConnectionFactory(uri).createXAConnection("guest", "guest");
+        connection.setClientID("clientName");
+        return connection;
     }
 
     private JmsXAConnection createFailoverXAConnection(String options, TestAmqpPeer... peers) throws Exception {
