@@ -50,6 +50,7 @@ import com.rabbitmq.client.jms.test.testpeer.ListDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.TestAmqpPeer;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
+import com.rabbitmq.client.jms.test.testpeer.describedtypes.Released;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.matchers.AcceptedMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.CoordinatorMatcher;
@@ -80,6 +81,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
     private static final Symbol XID = Symbol.valueOf("rabbitmq:xid");
     private static final Symbol XA_PREPARE = Symbol.valueOf("rabbitmq:xa-prepare");
     private static final Symbol XA_COMMIT = Symbol.valueOf("rabbitmq:xa-commit");
+    private static final Symbol XA_RECOVER = Symbol.valueOf("rabbitmq:xa-recover");
 
     private static final Binary TXN_ID_1 = new Binary(new byte[] { 1, 2, 3, 4 });
     private static final Binary TXN_ID_2 = new Binary(new byte[] { 5, 6, 7, 8 });
@@ -359,6 +361,44 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
 
             testPeer.expectDischarge(TXN_ID_2, true);
             assertXaError(XAException.XA_RBROLLBACK, () -> resource.prepare(failed));
+
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testUnexpectedRepliesFailXaRequests() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid notPrepared = new TestXid(1);
+            Xid prepared = new TestXid(2);
+
+            JmsXAConnection connection = createXAConnection(testPeer);
+
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, notPrepared, TXN_ID_1);
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_1, new Released());
+            resource.start(notPrepared, XAResource.TMNOFLAGS);
+            resource.end(notPrepared, XAResource.TMSUCCESS);
+            assertXaError(XAException.XAER_RMERR, () -> resource.prepare(notPrepared));
+
+            expectXaDeclare(testPeer, prepared, TXN_ID_2);
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_2, new Accepted());
+            expectXaControl(testPeer, XA_COMMIT, xid(prepared), new Released());
+            resource.start(prepared, XAResource.TMNOFLAGS);
+            resource.end(prepared, XAResource.TMSUCCESS);
+            resource.prepare(prepared);
+            assertXaError(XAException.XA_RETRY, () -> resource.commit(prepared, false));
+
+            testPeer.expectTransfer(new ControlMatcher(XA_RECOVER), nullValue(), new Accepted(), true);
+            assertXaError(XAException.XAER_RMERR, () -> resource.recover(XAResource.TMSTARTRSCAN));
 
             testPeer.expectClose();
             connection.close();
