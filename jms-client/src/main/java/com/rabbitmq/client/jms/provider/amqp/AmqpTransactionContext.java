@@ -259,7 +259,6 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                     result.onFailure(new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest));
                     break;
                 }
-                setCurrent(null);
                 preCommit();
                 withCoordinator(result, () -> coordinator.xaPrepare(branch.amqpTransactionId(), xaRequest,
                     new XaCompletion(result) {
@@ -284,13 +283,14 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                     result.onFailure(new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest));
                     break;
                 }
-                setCurrent(null);
                 preCommit();
                 dischargeBranch(branch, key, false, xaRequest, result);
                 break;
             case ROLLBACK:
                 if (branch != null && !branch.prepared) {
-                    setCurrent(null);
+                    if (branch.txId.equals(current)) {
+                        setCurrent(null);
+                    }
                     preRollback();
                     dischargeBranch(branch, key, true, xaRequest, result);
                 } else {
