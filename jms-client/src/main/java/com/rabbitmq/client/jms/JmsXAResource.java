@@ -28,6 +28,7 @@ import javax.transaction.xa.Xid;
 
 import com.rabbitmq.client.jms.meta.JmsXaRequest;
 import com.rabbitmq.client.jms.meta.JmsXaRequest.Type;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutException;
 
 /**
  * The resource that a transaction manager uses to control the branch of a session.
@@ -154,7 +155,15 @@ public class JmsXAResource implements XAResource {
             if (state != null && state != State.PREPARED) {
                 throw new XAException(XAException.XAER_PROTO);
             }
-            connection.xa(new JmsXaRequest(Type.COMMIT, session.getSessionId(), xid));
+            try {
+                connection.xa(new JmsXaRequest(Type.COMMIT, session.getSessionId(), xid));
+            } catch (XAException e) {
+                XAException failure = preparedCommitFailure(e);
+                if (failure.errorCode == XAException.XAER_NOTA || failure.errorCode == XAException.XA_HEURRB) {
+                    branches.remove(key);
+                }
+                throw failure;
+            }
             branches.remove(key);
         }
     }
@@ -166,14 +175,60 @@ public class JmsXAResource implements XAResource {
     }
 
     private void rollbackBranch(Xid xid, String key) throws XAException {
+        State state = branches.get(key);
         if (current != null && key(current).equals(key)) {
             current = null;
             context().setInBranch(false);
         }
         try {
             connection.xa(new JmsXaRequest(Type.ROLLBACK, session.getSessionId(), xid));
+        } catch (XAException e) {
+            // A branch that is not open on this session is rolled back by its xid.
+            throw state == State.PREPARED || state == null ? preparedRollbackFailure(e) : e;
         } finally {
             branches.remove(key);
+        }
+    }
+
+    /**
+     * A prepared branch can no longer be rolled back by the resource manager, so a failure of
+     * its commit must not look like a failed branch to the transaction manager. Only an
+     * unknown branch and a heuristic rollback are final answers, and a lost connection is
+     * reported as it is. Every other failure, including a reply that does not arrive, is a
+     * reason to try again, which is safe because the commit is repeatable.
+     */
+    static XAException preparedCommitFailure(XAException failure) {
+        switch (failure.errorCode) {
+            case XAException.XAER_NOTA:
+            case XAException.XA_HEURRB:
+                return failure;
+            case XAException.XAER_RMFAIL:
+                if (!(failure.getCause() instanceof ProviderOperationTimedOutException)) {
+                    return failure;
+                }
+                break;
+            default:
+                break;
+        }
+        XAException retry = new XAException(XAException.XA_RETRY);
+        retry.initCause(failure.getCause() != null ? failure.getCause() : failure);
+        return retry;
+    }
+
+    /**
+     * The same for the rollback of a prepared branch, which cannot return a code to retry, so
+     * the failure that is not a final answer is reported as one of the resource manager.
+     */
+    static XAException preparedRollbackFailure(XAException failure) {
+        switch (failure.errorCode) {
+            case XAException.XAER_NOTA:
+            case XAException.XA_HEURRB:
+            case XAException.XAER_RMFAIL:
+                return failure;
+            default:
+                XAException unavailable = new XAException(XAException.XAER_RMFAIL);
+                unavailable.initCause(failure.getCause() != null ? failure.getCause() : failure);
+                return unavailable;
         }
     }
 
