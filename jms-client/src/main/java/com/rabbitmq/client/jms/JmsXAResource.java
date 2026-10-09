@@ -202,7 +202,8 @@ public class JmsXAResource implements XAResource {
                 connection.xa(request(Type.COMMIT, xid));
             } catch (XAException e) {
                 XAException failure = preparedCommitFailure(e);
-                if (failure.errorCode == XAException.XAER_NOTA || failure.errorCode == XAException.XA_HEURRB) {
+                if (failure.errorCode == XAException.XAER_NOTA || failure.errorCode == XAException.XA_HEURRB
+                        || failure.errorCode == XAException.XA_HEURCOM) {
                     branches.remove(key);
                 }
                 throw failure;
@@ -246,7 +247,7 @@ public class JmsXAResource implements XAResource {
     /**
      * A prepared branch can no longer be rolled back by the resource manager, so a failure of
      * its commit must not look like a failed branch to the transaction manager. Only an
-     * unknown branch and a heuristic rollback are final answers, and a lost connection is
+     * unknown branch and a heuristic outcome are final answers, and a lost connection is
      * reported as it is. Every other failure, including a reply that does not arrive, is a
      * reason to try again, which is safe because the commit is repeatable.
      */
@@ -254,6 +255,7 @@ public class JmsXAResource implements XAResource {
         switch (failure.errorCode) {
             case XAException.XAER_NOTA:
             case XAException.XA_HEURRB:
+            case XAException.XA_HEURCOM:
                 return failure;
             case XAException.XAER_RMFAIL:
                 if (!(failure.getCause() instanceof ProviderOperationTimedOutException)) {
@@ -276,6 +278,7 @@ public class JmsXAResource implements XAResource {
         switch (failure.errorCode) {
             case XAException.XAER_NOTA:
             case XAException.XA_HEURRB:
+            case XAException.XA_HEURCOM:
             case XAException.XAER_RMFAIL:
                 return failure;
             default:

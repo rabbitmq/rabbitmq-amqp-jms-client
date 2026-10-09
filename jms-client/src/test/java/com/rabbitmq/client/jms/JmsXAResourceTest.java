@@ -40,9 +40,11 @@ public class JmsXAResourceTest {
     @Test
     public void commitOfPreparedBranchKeepsFinalAnswers() {
         XAException unknown = failure(XAException.XAER_NOTA, null);
-        XAException heuristic = failure(XAException.XA_HEURRB, null);
+        XAException heuristicRollback = failure(XAException.XA_HEURRB, null);
+        XAException heuristicCommit = failure(XAException.XA_HEURCOM, null);
         assertSame(unknown, JmsXAResource.preparedCommitFailure(unknown));
-        assertSame(heuristic, JmsXAResource.preparedCommitFailure(heuristic));
+        assertSame(heuristicRollback, JmsXAResource.preparedCommitFailure(heuristicRollback));
+        assertSame(heuristicCommit, JmsXAResource.preparedCommitFailure(heuristicCommit));
     }
 
     @Test
@@ -74,7 +76,10 @@ public class JmsXAResourceTest {
 
     @Test
     public void rollbackOfPreparedBranchKeepsFinalAnswers() {
-        for (int code : new int[] {XAException.XAER_NOTA, XAException.XA_HEURRB, XAException.XAER_RMFAIL}) {
+        int[] codes = {
+            XAException.XAER_NOTA, XAException.XA_HEURRB, XAException.XA_HEURCOM, XAException.XAER_RMFAIL
+        };
+        for (int code : codes) {
             XAException expected = failure(code, null);
             assertSame(expected, JmsXAResource.preparedRollbackFailure(expected));
         }
