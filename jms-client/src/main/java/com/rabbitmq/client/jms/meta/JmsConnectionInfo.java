@@ -50,6 +50,7 @@ public final class JmsConnectionInfo extends JmsAbstractResource implements Comp
     public static final long DEFAULT_CLOSE_TIMEOUT = 60000;
     public static final long DEFAULT_SEND_TIMEOUT = INFINITE;
     public static final long DEFAULT_REQUEST_TIMEOUT = INFINITE;
+    public static final long DEFAULT_XA_REQUEST_TIMEOUT = 60000;
 
     private final JmsConnectionId connectionId;
     private final EnumMap<JmsConnectionExtensions, BiFunction<Connection, URI, Object>> extensionMap = new EnumMap<>(JmsConnectionExtensions.class);
@@ -76,6 +77,7 @@ public final class JmsConnectionInfo extends JmsAbstractResource implements Comp
     private boolean closeLinksThatFailOnReconnect;
     private long sendTimeout = DEFAULT_SEND_TIMEOUT;
     private long requestTimeout = DEFAULT_REQUEST_TIMEOUT;
+    private long xaRequestTimeout = DEFAULT_XA_REQUEST_TIMEOUT;
     private long connectTimeout = DEFAULT_CONNECT_TIMEOUT;
     private long closeTimeout = DEFAULT_CLOSE_TIMEOUT;
     private String queuePrefix = null;
@@ -114,6 +116,7 @@ public final class JmsConnectionInfo extends JmsAbstractResource implements Comp
         copy.forceSyncSend = forceSyncSend;
         copy.sendTimeout = sendTimeout;
         copy.requestTimeout = requestTimeout;
+        copy.xaRequestTimeout = xaRequestTimeout;
         copy.closeTimeout = closeTimeout;
         copy.queuePrefix = queuePrefix;
         copy.topicPrefix = topicPrefix;
@@ -257,6 +260,17 @@ public final class JmsConnectionInfo extends JmsAbstractResource implements Comp
 
     public void setRequestTimeout(long requestTimeout) {
         this.requestTimeout = requestTimeout;
+    }
+
+    /**
+     * @return how long an XA request waits for its reply when the request timeout is infinite
+     */
+    public long getXaRequestTimeout() {
+        return xaRequestTimeout;
+    }
+
+    public void setXaRequestTimeout(long xaRequestTimeout) {
+        this.xaRequestTimeout = xaRequestTimeout;
     }
 
     public boolean isLocalMessagePriority() {

@@ -27,6 +27,8 @@ import com.rabbitmq.client.jms.meta.JmsConsumerId;
 import com.rabbitmq.client.jms.meta.JmsResource;
 import com.rabbitmq.client.jms.meta.JmsSessionId;
 import com.rabbitmq.client.jms.meta.JmsTransactionInfo;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderUnsupportedOperationException;
 import com.rabbitmq.client.jms.provider.ProviderConstants.ACK_TYPE;
 
 /**
@@ -266,6 +268,22 @@ public interface Provider {
      * @throws ProviderException if an error occurs or the Provider is already closed.
      */
     void rollback(JmsTransactionInfo transactionInfo, JmsTransactionInfo nextTransactionInfo, AsyncResult request) throws ProviderException;
+
+    /**
+     * Called to run an operation on an XA branch. A provider that does not support XA
+     * does not have to implement it.
+     *
+     * @param xaRequest
+     *        describes the operation. A recover request has its result set before the
+     *        request is signaled.
+     * @param request
+     *        The request object that should be signaled when this operation completes.
+     *
+     * @throws ProviderException if an error occurs or the Provider is already closed.
+     */
+    default void xa(JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        throw new ProviderUnsupportedOperationException("XA is not supported by this provider");
+    }
 
     /**
      * Called to recover all unacknowledged messages for a Session in client Ack mode.

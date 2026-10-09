@@ -41,6 +41,7 @@ import com.rabbitmq.client.jms.meta.JmsConsumerId;
 import com.rabbitmq.client.jms.meta.JmsResource;
 import com.rabbitmq.client.jms.meta.JmsSessionId;
 import com.rabbitmq.client.jms.meta.JmsTransactionInfo;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
 import com.rabbitmq.client.jms.provider.AsyncResult;
 import com.rabbitmq.client.jms.provider.DefaultProviderListener;
 import com.rabbitmq.client.jms.provider.Provider;
@@ -446,6 +447,30 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
             @Override
             public String toString() {
                 return "TX rollback -> " + transactionInfo.getId();
+            }
+        };
+
+        pending.run();
+    }
+
+    @Override
+    public void xa(final JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        checkClosed();
+        final FailoverRequest pending = new FailoverRequest(request, requestTimeout) {
+            @Override
+            public void doTask(Provider provider) throws ProviderException {
+                provider.xa(xaRequest, this);
+            }
+
+            @Override
+            public boolean failureWhenOffline() {
+                // A transaction manager retries a failed XA operation, so it does not wait for a reconnect.
+                return true;
+            }
+
+            @Override
+            public String toString() {
+                return xaRequest.toString();
             }
         };
 

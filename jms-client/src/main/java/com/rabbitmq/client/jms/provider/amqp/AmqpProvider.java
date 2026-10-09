@@ -52,6 +52,7 @@ import com.rabbitmq.client.jms.meta.JmsResourceVistor;
 import com.rabbitmq.client.jms.meta.JmsSessionId;
 import com.rabbitmq.client.jms.meta.JmsSessionInfo;
 import com.rabbitmq.client.jms.meta.JmsTransactionInfo;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
 import com.rabbitmq.client.jms.provider.AsyncResult;
 import com.rabbitmq.client.jms.provider.NoOpAsyncResult;
 import com.rabbitmq.client.jms.provider.Provider;
@@ -775,6 +776,31 @@ public class AmqpProvider implements Provider, TransportListener , AmqpResourceP
                     } else {
                         throw new ProviderIllegalStateException("Rollback of transaction failed because no session exists");
                     }
+                }
+            } catch (Throwable t) {
+                request.onFailure(ProviderExceptionSupport.createNonFatalOrPassthrough(t));
+            }
+        });
+    }
+
+    @Override
+    public void xa(final JmsXaRequest xaRequest, final AsyncResult request) throws ProviderException {
+        checkClosedOrFailed();
+        checkConnected();
+
+        serializer.execute(() -> {
+
+            try {
+                checkClosedOrFailed();
+                AmqpSession session = connection.getSession(xaRequest.getSessionId());
+                if (session == null && xaRequest.runsOnAnySession()) {
+                    session = connection.getConnectionSession();
+                }
+                if (session != null) {
+                    session.xa(xaRequest, request);
+                    pumpToProtonTransport(request);
+                } else {
+                    throw new ProviderIllegalStateException(xaRequest + " failed because no session exists");
                 }
             } catch (Throwable t) {
                 request.onFailure(ProviderExceptionSupport.createNonFatalOrPassthrough(t));
