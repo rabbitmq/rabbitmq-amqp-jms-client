@@ -207,6 +207,7 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
     private static final Symbol XA_DUPLICATE_ID = Symbol.valueOf("rabbitmq:xa:duplicate-id");
     private static final Symbol XA_PROTOCOL_ERROR = Symbol.valueOf("rabbitmq:xa:protocol-error");
     private static final Symbol XA_HEURISTIC_ROLLBACK = Symbol.valueOf("rabbitmq:xa:heuristic-rollback");
+    private static final Symbol XA_HEURISTIC_COMMIT = Symbol.valueOf("rabbitmq:xa:heuristic-commit");
     private static final Symbol INVALID_FIELD = Symbol.valueOf("amqp:invalid-field");
 
     /**
@@ -346,6 +347,8 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
             code = XAException.XAER_PROTO;
         } else if (XA_HEURISTIC_ROLLBACK.equals(condition)) {
             code = XAException.XA_HEURRB;
+        } else if (XA_HEURISTIC_COMMIT.equals(condition)) {
+            code = XAException.XA_HEURCOM;
         } else if (INVALID_FIELD.equals(condition)) {
             code = XAException.XAER_INVAL;
         } else {
