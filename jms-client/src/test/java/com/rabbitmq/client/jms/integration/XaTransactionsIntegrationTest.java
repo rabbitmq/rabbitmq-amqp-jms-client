@@ -473,7 +473,10 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             expectXaCoordinatorAttach(testPeer);
             testPeer.expectTransfer(new ControlMatcher(DECLARE, xid(late)), nullValue(), false, true,
                 new Declared().setTxnId(TXN_ID_1), true, 0, 700);
+            // The broker holds the late branch as the open transaction of the session.
+            testPeer.expectDischarge(TXN_ID_1, true);
             assertXaError(XAException.XAER_RMFAIL, () -> resource.start(late, XAResource.TMNOFLAGS));
+            testPeer.waitForAllHandlersToComplete(2000);
 
             testPeer.expectSenderAttach();
             MessageProducer producer = session.createProducer(session.createQueue("myQueue"));

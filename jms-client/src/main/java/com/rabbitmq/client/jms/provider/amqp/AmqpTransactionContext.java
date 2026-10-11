@@ -29,6 +29,7 @@ import com.rabbitmq.client.jms.meta.JmsTransactionInfo;
 import com.rabbitmq.client.jms.meta.JmsXaRequest;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderXaException;
 import com.rabbitmq.client.jms.provider.AsyncResult;
+import com.rabbitmq.client.jms.provider.NoOpAsyncResult;
 import com.rabbitmq.client.jms.provider.ProviderException;
 import com.rabbitmq.client.jms.provider.amqp.builders.AmqpTransactionCoordinatorBuilder;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderIllegalStateException;
@@ -300,9 +301,23 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                     xaBranches.put(xaRequest.getKey(), txId);
                     setCurrent(txId);
                     super.onSuccess();
+                } else {
+                    // The broker holds the transaction as the one of the session, and
+                    // would refuse the next start.
+                    rollbackLateBranch(xaRequest, txId);
                 }
             }
         }));
+    }
+
+    private void rollbackLateBranch(JmsXaRequest start, JmsTransactionId txId) {
+        JmsXaRequest rollback = new JmsXaRequest(JmsXaRequest.Type.ROLLBACK, start.getSessionId(),
+                                                 start.getXid(), start.getKey());
+        try {
+            coordinator.xaDischarge(amqpTransactionId(txId), true, rollback, NoOpAsyncResult.INSTANCE);
+        } catch (ProviderException e) {
+            LOG.debug("{} Failed to roll back the branch of a start that timed out: {}", this, e.getMessage());
+        }
     }
 
     private static Binary amqpTransactionId(JmsTransactionId txId) {
