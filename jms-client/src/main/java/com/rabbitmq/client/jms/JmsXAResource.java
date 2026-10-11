@@ -65,6 +65,8 @@ public class JmsXAResource implements XAResource {
     private final Map<String, Branch> branches = new HashMap<>();
     private final AtomicLong interruptions = new AtomicLong();
     private volatile Branch current;
+    // Set when the session was closed while a branch of it was not prepared yet.
+    private Runnable deferredClose;
 
     JmsXAResource(JmsXASession session) {
         this.session = session;
@@ -154,6 +156,14 @@ public class JmsXAResource implements XAResource {
 
     @Override
     public synchronized int prepare(Xid xid) throws XAException {
+        try {
+            return prepareBranch(xid);
+        } finally {
+            closeIfComplete();
+        }
+    }
+
+    private int prepareBranch(Xid xid) throws XAException {
         Branch branch = branches.get(key(xid));
         if (branch == null) {
             throw new XAException(XAException.XAER_NOTA);
@@ -181,6 +191,14 @@ public class JmsXAResource implements XAResource {
 
     @Override
     public synchronized void commit(Xid xid, boolean onePhase) throws XAException {
+        try {
+            commitBranch(xid, onePhase);
+        } finally {
+            closeIfComplete();
+        }
+    }
+
+    private void commitBranch(Xid xid, boolean onePhase) throws XAException {
         String key = key(xid);
         Branch branch = branches.get(key);
         if (onePhase) {
@@ -224,7 +242,30 @@ public class JmsXAResource implements XAResource {
     @Override
     public synchronized void rollback(Xid xid) throws XAException {
         String key = key(xid);
-        rollbackBranch(xid, key, branches.get(key));
+        try {
+            rollbackBranch(xid, key, branches.get(key));
+        } finally {
+            closeIfComplete();
+        }
+    }
+
+    /**
+     * "In the case where a session's work is coordinated by an external transaction
+     * manager, [...] the result of a closed session's work is determined later by the
+     * transaction manager." [Jakarta Messaging 3.1, 6.1.8] The session therefore stays
+     * open until each of its branches is prepared or complete.
+     */
+    synchronized void closeWhenBranchesComplete(Runnable close) {
+        deferredClose = close;
+        closeIfComplete();
+    }
+
+    private void closeIfComplete() {
+        if (deferredClose != null && branches.values().stream().allMatch(b -> b.state == State.PREPARED)) {
+            Runnable close = deferredClose;
+            deferredClose = null;
+            close.run();
+        }
     }
 
     private void rollbackBranch(Xid xid, String key, Branch branch) throws XAException {
@@ -345,7 +386,7 @@ public class JmsXAResource implements XAResource {
      */
     private boolean isLost(Branch branch) {
         return branch.state != State.PREPARED
-            && (branch.interruptions != interruptions.get() || session.isClosed());
+            && (branch.interruptions != interruptions.get() || session.isClosed() && deferredClose == null);
     }
 
     boolean isAssociated() {

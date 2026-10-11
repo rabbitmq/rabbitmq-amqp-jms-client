@@ -24,11 +24,15 @@ import jakarta.jms.TransactionInProgressException;
 import jakarta.jms.XASession;
 
 import com.rabbitmq.client.jms.meta.JmsSessionId;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A session whose work is part of the XA transactions that a transaction manager controls.
  */
 public class JmsXASession extends JmsSession implements XASession {
+
+    private static final Logger LOG = LoggerFactory.getLogger(JmsXASession.class);
 
     protected JmsXASession(JmsConnection connection, JmsSessionId sessionId) throws JMSException {
         super(connection, sessionId, Session.SESSION_TRANSACTED);
@@ -42,6 +46,22 @@ public class JmsXASession extends JmsSession implements XASession {
     @Override
     protected boolean isXa() {
         return true;
+    }
+
+    @Override
+    protected void doClose() throws JMSException {
+        boolean interrupted = Thread.interrupted();
+        shutdown();
+        ((JmsXATransactionContext) getTransactionContext()).getXAResource().closeWhenBranchesComplete(() -> {
+            try {
+                destroy();
+            } catch (JMSException e) {
+                LOG.debug("Failed to close the session of completed XA branches: {}", e.getMessage());
+            }
+        });
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Override

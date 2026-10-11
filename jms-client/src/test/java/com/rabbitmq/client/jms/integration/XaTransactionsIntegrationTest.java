@@ -320,12 +320,17 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
                 resource.end(xid, XAResource.TMSUCCESS);
             }
 
-            testPeer.expectEnd();
+            // The session ends once the last branch that is not prepared has been completed.
             session.close();
 
-            assertXaError(XAException.XA_RBROLLBACK, () -> resource.prepare(toPrepare));
-            assertXaError(XAException.XA_RBROLLBACK, () -> resource.commit(toCommit, true));
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_2, new Accepted());
+            assertEquals(XAResource.XA_OK, resource.prepare(toPrepare));
+            testPeer.expectDischarge(TXN_ID_2, false);
+            resource.commit(toCommit, true);
+            testPeer.expectDischarge(TXN_ID_2, true);
+            testPeer.expectEnd();
             resource.rollback(toRollback);
+            testPeer.waitForAllHandlersToComplete(1000);
 
             expectXaCoordinatorAttach(testPeer);
             expectXaControl(testPeer, XA_COMMIT, xid(prepared), new Accepted());
