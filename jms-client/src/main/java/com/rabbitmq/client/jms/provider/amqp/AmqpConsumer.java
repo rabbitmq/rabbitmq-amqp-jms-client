@@ -702,6 +702,25 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     }
 
     /**
+     * After a commit that the remote peer rolled back, the messages acknowledged in the
+     * transaction are still acquired by us, so we deliver them again. If the outcome is
+     * not known, we give them back, which the remote peer ignores for deliveries that
+     * the commit settled.
+     */
+    public void postFailedCommit(boolean rolledBack) {
+        if (rolledBack) {
+            redeliverTransactedDeliveries();
+        } else {
+            for (Delivery delivery : transactedDeliveries) {
+                delivery.disposition(MODIFIED_FAILED);
+                delivery.settle();
+            }
+            transactedDeliveries.clear();
+        }
+        tryCompleteDeferredClose();
+    }
+
+    /**
      * After a rollback, the messages acknowledged in the transaction are still
      * acquired by us, so we deliver them again, as a session recover does.
      * A consumer that is closing gives them back to the remote peer instead.
