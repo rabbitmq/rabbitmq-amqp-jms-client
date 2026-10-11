@@ -946,6 +946,76 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
         }
     }
 
+    // A message that a rollback delivered again was delivered before, so a later
+    // rollback gives it back as a failed delivery, even if the application did not
+    // receive it again.
+    @Test
+    @Timeout(20)
+    public void testSecondRollbackGivesBackRecoveredMessageAsFailed() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
+            final int messageCount = 2;
+            Connection connection = testFixture.establishConnecton(testPeer);
+            connection.start();
+
+            testPeer.expectBegin();
+            testPeer.expectCoordinatorAttach();
+
+            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
+            testPeer.expectDeclare(txnId);
+
+            Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+            Queue queue = session.createQueue("myQueue");
+
+            testPeer.expectReceiverAttach();
+            testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"),
+                                                       messageCount, false, false, greaterThan(UnsignedInteger.ZERO), 1, false, true);
+
+            TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
+            stateMatcher.withTxnId(equalTo(txnId));
+            stateMatcher.withOutcome(new AcceptedMatcher());
+            for (int i = 1; i <= messageCount; i++) {
+                testPeer.expectDisposition(false, stateMatcher);
+            }
+
+            MessageConsumer messageConsumer = session.createConsumer(queue);
+            for (int i = 0; i < messageCount; i++) {
+                assertNotNull(messageConsumer.receive(3000));
+            }
+
+            testPeer.expectLinkFlow(true, true, greaterThan(UnsignedInteger.ZERO));
+            testPeer.expectDischarge(txnId, true);
+            Binary txnId2 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
+            testPeer.expectDeclare(txnId2);
+            testPeer.expectLinkFlow(false, false, greaterThan(UnsignedInteger.ZERO));
+
+            session.rollback();
+
+            TransactionalStateMatcher stateMatcher2 = new TransactionalStateMatcher();
+            stateMatcher2.withTxnId(equalTo(txnId2));
+            stateMatcher2.withOutcome(new AcceptedMatcher());
+            testPeer.expectDisposition(false, stateMatcher2);
+            Message message = messageConsumer.receive(3000);
+            assertNotNull(message);
+            assertEquals(0, message.getIntProperty(TestAmqpPeer.MESSAGE_NUMBER));
+
+            testPeer.expectLinkFlow(true, true, greaterThan(UnsignedInteger.ZERO));
+            testPeer.expectDischarge(txnId2, true);
+            testPeer.expectDeclare(txnId);
+            testPeer.expectDisposition(true, new ModifiedMatcher().withDeliveryFailed(equalTo(true)));
+            testPeer.expectLinkFlow(false, false, greaterThan(UnsignedInteger.ZERO));
+
+            session.rollback();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+
+            testPeer.expectDischarge(txnId, true);
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
     // A commit that the remote peer rolled back leaves the deliveries acquired, as a rollback does.
     @Test
     @Timeout(20)
