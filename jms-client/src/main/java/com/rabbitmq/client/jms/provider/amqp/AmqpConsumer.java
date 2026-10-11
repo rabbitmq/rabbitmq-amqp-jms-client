@@ -70,6 +70,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     // until the transaction commits, because they remain acquired by us if it
     // rolls back.
     private final List<Delivery> transactedDeliveries = new ArrayList<>();
+    // Deliveries acknowledged in an XA branch that a reconnect has lost.
+    private final List<Delivery> lostBranchDeliveries = new ArrayList<>();
 
     public AmqpConsumer(AmqpSession session, JmsConsumerInfo info, Receiver receiver) {
         super(info, receiver, session);
@@ -355,6 +357,10 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
         if (!delivery.remotelySettled()) {
             if (session.isTransacted() && !getResourceInfo().isBrowser()) {
                 if (session.isTransactionInDoubt()) {
+                    if (session.getResourceInfo().isXa()) {
+                        lostBranchDeliveries.add(delivery);
+                        session.getTransactionContext().registerTxConsumer(this);
+                    }
                     LOG.trace("Skipping ack of message {} in failed transaction.", envelope);
                     return;
                 }
@@ -699,6 +705,18 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     public void postRollback() {
         releasePrefetch();
         redeliverTransactedDeliveries();
+        tryCompleteDeferredClose();
+    }
+
+    /**
+     * A branch that a reconnect has lost rolls back, so the messages acknowledged in it
+     * go back to the remote peer once it ends.
+     */
+    public void postLostBranch() {
+        for (Delivery delivery : lostBranchDeliveries) {
+            handleDisposition((JmsInboundMessageDispatch) delivery.getContext(), delivery, MODIFIED_FAILED);
+        }
+        lostBranchDeliveries.clear();
         tryCompleteDeferredClose();
     }
 

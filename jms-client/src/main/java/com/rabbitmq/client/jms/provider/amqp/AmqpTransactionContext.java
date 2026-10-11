@@ -235,7 +235,11 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                 result.onSuccess();
                 break;
             case END:
+                boolean lost = inUnknownBranch;
                 setCurrent(null);
+                if (lost) {
+                    postLostBranch();
+                }
                 result.onSuccess();
                 break;
             case PREPARE:
@@ -501,6 +505,15 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     private void postRollback() {
         for (AmqpConsumer consumer : txConsumers.values()) {
             consumer.postRollback();
+        }
+
+        txConsumers.clear();
+        txProducers.clear();
+    }
+
+    private void postLostBranch() {
+        for (AmqpConsumer consumer : txConsumers.values()) {
+            consumer.postLostBranch();
         }
 
         txConsumers.clear();
