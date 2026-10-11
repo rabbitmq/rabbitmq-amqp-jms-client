@@ -83,7 +83,7 @@ public class JmsXATransactionContext implements JmsTransactionContext {
 
     @Override
     public void shutdown() throws JMSException {
-        // Closing the session ends its control link, which rolls back an open branch.
+        // The transaction manager completes the branches, see JmsXAResource#closeWhenBranchesComplete.
     }
 
     @Override

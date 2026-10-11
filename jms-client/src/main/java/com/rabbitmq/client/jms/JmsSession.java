@@ -322,12 +322,21 @@ public class JmsSession implements AutoCloseable, Session, QueueSession, TopicSe
     protected void doClose() throws JMSException {
         boolean interrupted = Thread.interrupted();
         shutdown();
+        destroy();
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Requests that the Provider destroy the Session and it's child resources.
+     *
+     * @throws JMSException if an internal error occurs during the destroy operation.
+     */
+    protected void destroy() throws JMSException {
         try {
             connection.destroyResource(sessionInfo);
         } catch (JmsConnectionFailedException jmsex) {
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
         }
     }
 
