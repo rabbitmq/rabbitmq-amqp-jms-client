@@ -17,7 +17,9 @@
 package com.rabbitmq.client.jms.provider.amqp;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import javax.transaction.xa.XAException;
 
@@ -200,6 +202,8 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     //----- XA ---------------------------------------------------------------//
 
     private final Map<String, JmsTransactionId> xaBranches = new HashMap<>();
+    // Branches that the remote peer rolled back when it detached the control link.
+    private final Set<String> rolledBackBranches = new HashSet<>();
     private boolean inUnknownBranch;
 
     private interface XaAction {
@@ -222,6 +226,12 @@ public class AmqpTransactionContext implements AmqpResourceParent {
      * @throws ProviderException if the operation cannot be started.
      */
     public void xa(final JmsXaRequest xaRequest, final AsyncResult result) throws ProviderException {
+        if (coordinator != null && coordinator.isClosed()) {
+            // "If the control link is closed while there exist non-discharged transactions
+            // it created, then all such transactions are immediately rolled back" [4.1]
+            rolledBackBranches.addAll(xaBranches.keySet());
+            xaBranches.clear();
+        }
         final String key = xaRequest.getKey();
         final JmsTransactionId txId = key == null ? null : xaBranches.get(key);
 
@@ -236,7 +246,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                 result.onSuccess();
                 break;
             case END:
-                boolean lost = inUnknownBranch;
+                boolean lost = isTransactionInDoubt();
                 setCurrent(null);
                 if (lost) {
                     postLostBranch();
@@ -245,7 +255,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                 break;
             case PREPARE:
                 if (txId == null) {
-                    result.onFailure(new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest));
+                    result.onFailure(unknownBranch(key, xaRequest));
                     break;
                 }
                 preCommit();
@@ -254,7 +264,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                 break;
             case COMMIT_ONE_PHASE:
                 if (txId == null) {
-                    result.onFailure(new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest));
+                    result.onFailure(unknownBranch(key, xaRequest));
                     break;
                 }
                 preCommit();
@@ -262,6 +272,10 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                     new BranchCompletion(key, result)));
                 break;
             case ROLLBACK:
+                if (txId == null && rolledBackBranches.remove(key)) {
+                    result.onSuccess();
+                    break;
+                }
                 if (txId == null) {
                     withCoordinator(result, () -> coordinator.xaRollback(xaRequest.getXid(), xaRequest,
                         new XaCompletion(result)));
@@ -308,6 +322,14 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                 }
             }
         }));
+    }
+
+    private ProviderXaException unknownBranch(String key, JmsXaRequest xaRequest) {
+        if (rolledBackBranches.remove(key)) {
+            return new ProviderXaException(XAException.XA_RBROLLBACK,
+                "Branch rolled back when the control link was detached " + xaRequest);
+        }
+        return new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest);
     }
 
     private void rollbackLateBranch(JmsXaRequest start, JmsTransactionId txId) {
@@ -526,13 +548,12 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         txProducers.clear();
     }
 
+    // The consumers stay registered for another branch of the session that has not
+    // been prepared yet.
     private void postLostBranch() {
         for (AmqpConsumer consumer : txConsumers.values()) {
             consumer.postLostBranch();
         }
-
-        txConsumers.clear();
-        txProducers.clear();
     }
 
     private void postFailedCommit(boolean rolledBack) {
