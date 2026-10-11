@@ -226,11 +226,16 @@ public class AmqpTransactionContext implements AmqpResourceParent {
      * @throws ProviderException if the operation cannot be started.
      */
     public void xa(final JmsXaRequest xaRequest, final AsyncResult result) throws ProviderException {
-        if (coordinator != null && coordinator.isClosed()) {
+        if (coordinator != null && coordinator.isClosed() && !xaBranches.isEmpty()) {
             // "If the control link is closed while there exist non-discharged transactions
             // it created, then all such transactions are immediately rolled back" [4.1]
             rolledBackBranches.addAll(xaBranches.keySet());
             xaBranches.clear();
+            for (AmqpConsumer consumer : txConsumers.values()) {
+                consumer.giveBackTransactedDeliveries();
+            }
+            txConsumers.clear();
+            txProducers.clear();
         }
         final String key = xaRequest.getKey();
         final JmsTransactionId txId = key == null ? null : xaBranches.get(key);
