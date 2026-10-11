@@ -59,6 +59,7 @@ import com.rabbitmq.client.jms.test.testpeer.describedtypes.TransactionalState;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.matchers.AcceptedMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.CoordinatorMatcher;
+import com.rabbitmq.client.jms.test.testpeer.matchers.ModifiedMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.TransactionalStateMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessageAnnotationsSectionMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.sections.MessageHeaderSectionMatcher;
@@ -147,7 +148,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
 
     @Test
     @Timeout(20)
-    public void testAcknowledgementsInBranchLostOnFailoverAreDropped() throws Exception {
+    public void testAcknowledgementsInBranchLostOnFailoverAreGivenBack() throws Exception {
         try (TestAmqpPeer originalPeer = new TestAmqpPeer();
              TestAmqpPeer finalPeer = new TestAmqpPeer()) {
 
@@ -180,6 +181,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             MessageConsumer consumer = session.createConsumer(session.createQueue("myQueue"));
             assertNotNull(consumer.receive(3000));
 
+            finalPeer.expectDisposition(true, new ModifiedMatcher().withDeliveryFailed(equalTo(true)));
             resource.rollback(xid);
 
             finalPeer.expectSenderAttach();
