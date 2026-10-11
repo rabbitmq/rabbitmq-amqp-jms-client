@@ -96,7 +96,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
         if (acknowledgementMode == Session.CLIENT_ACKNOWLEDGE
                 || acknowledgementMode == Session.AUTO_ACKNOWLEDGE
                     || acknowledgementMode == Session.DUPS_OK_ACKNOWLEDGE
-                        || acknowledgementMode == INDIVIDUAL_ACKNOWLEDGE) {
+                        || acknowledgementMode == INDIVIDUAL_ACKNOWLEDGE
+                            || acknowledgementMode == Session.SESSION_TRANSACTED) {
             // Send dispositions for any messages which were previously delivered and
             // session recovered, but were then not delivered again afterwards.
             Delivery delivery = getEndpoint().head();
@@ -811,7 +812,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
             if (current.getContext() instanceof JmsInboundMessageDispatch) {
                 JmsInboundMessageDispatch envelope = (JmsInboundMessageDispatch) current.getContext();
                 if (!envelope.isDelivered()) {
-                    handleDisposition(envelope, current, Released.getInstance());
+                    // A recovered message was delivered before, so it counts as a failed delivery.
+                    handleDisposition(envelope, current, envelope.isRecovered() ? MODIFIED_FAILED : Released.getInstance());
                 }
             } else {
                 LOG.debug("{} Found incomplete delivery with no context during release processing", AmqpConsumer.this);
