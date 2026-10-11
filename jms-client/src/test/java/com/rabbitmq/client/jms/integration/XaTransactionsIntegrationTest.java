@@ -342,6 +342,54 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
 
     @Test
     @Timeout(20)
+    public void testErrorCodesOfBranchesInTheWrongState() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid rollbackOnly = new TestXid(1);
+            Xid prepared = new TestXid(2);
+            Xid detached = new TestXid(3);
+
+            JmsXAConnection connection = createXAConnection(testPeer);
+
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, rollbackOnly, TXN_ID_1);
+            resource.start(rollbackOnly, XAResource.TMNOFLAGS);
+            resource.end(rollbackOnly, XAResource.TMFAIL);
+            assertXaError(XAException.XA_RBROLLBACK, () -> resource.start(rollbackOnly, XAResource.TMJOIN));
+            testPeer.expectDischarge(TXN_ID_1, true);
+            resource.rollback(rollbackOnly);
+
+            expectXaDeclare(testPeer, prepared, TXN_ID_2);
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_2, new Accepted());
+            resource.start(prepared, XAResource.TMNOFLAGS);
+            resource.end(prepared, XAResource.TMSUCCESS);
+            resource.prepare(prepared);
+            assertXaError(XAException.XAER_PROTO, () -> resource.start(prepared, XAResource.TMRESUME));
+            assertXaError(XAException.XAER_NOTA, () -> resource.end(new TestXid(4), XAResource.TMSUCCESS));
+            expectXaControl(testPeer, XA_COMMIT, xid(prepared), new Accepted());
+            resource.commit(prepared, false);
+
+            // The broker rolls back the branch when it detaches the control link.
+            Binary txnId3 = new Binary(new byte[] { 9 });
+            expectXaDeclare(testPeer, detached, txnId3);
+            testPeer.remotelyCloseLastCoordinatorLink();
+            resource.start(detached, XAResource.TMNOFLAGS);
+            testPeer.waitForAllHandlersToComplete(2000);
+            resource.end(detached, XAResource.TMSUCCESS);
+            assertXaError(XAException.XA_RBROLLBACK, () -> resource.prepare(detached));
+
+            testPeer.expectClose();
+            connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
     public void testEndOfSuspendedBranch() throws Exception {
         try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
             Xid succeeded = new TestXid(1);

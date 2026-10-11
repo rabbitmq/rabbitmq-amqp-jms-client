@@ -94,8 +94,14 @@ public class JmsXAResource implements XAResource {
                 if (current != null) {
                     throw new XAException(XAException.XAER_PROTO);
                 }
-                if (branch == null || (branch.state != State.SUSPENDED && branch.state != State.ENDED)) {
+                if (branch == null) {
                     throw new XAException(XAException.XAER_NOTA);
+                }
+                if (branch.state == State.ROLLBACK_ONLY) {
+                    throw new XAException(XAException.XA_RBROLLBACK);
+                }
+                if (branch.state != State.SUSPENDED && branch.state != State.ENDED) {
+                    throw new XAException(XAException.XAER_PROTO);
                 }
                 connection.xa(request(Type.RESUME, xid));
                 break;
@@ -127,7 +133,10 @@ public class JmsXAResource implements XAResource {
             branch.state = next;
             return;
         }
-        if (branch == null || branch != current) {
+        if (branch == null) {
+            throw new XAException(XAException.XAER_NOTA);
+        }
+        if (branch != current) {
             throw new XAException(XAException.XAER_PROTO);
         }
         // Dissociated first, so that a recovery during the request does not associate the session again.
