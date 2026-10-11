@@ -507,6 +507,15 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         txProducers.clear();
     }
 
+    private void postFailedCommit(boolean rolledBack) {
+        for (AmqpConsumer consumer : txConsumers.values()) {
+            consumer.postFailedCommit(rolledBack);
+        }
+
+        txConsumers.clear();
+        txProducers.clear();
+    }
+
     //----- Resource Parent implementation -----------------------------------//
 
     @Override
@@ -623,7 +632,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         }
 
         public void onDischargeSuccess() {
-            cleanup();
+            cleanup(null);
 
             // If the declare already returned a result we can proceed otherwise
             // we need to wait for it finish in order to get the correct outcome.
@@ -651,7 +660,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         }
 
         public void onDischargeFailure(ProviderException failure) {
-            cleanup();
+            cleanup(failure);
 
             // If the declare already returned a result we can proceed otherwise
             // we need to wait for it finish in order to get the correct outcome.
@@ -662,11 +671,13 @@ public class AmqpTransactionContext implements AmqpResourceParent {
             }
         }
 
-        private void cleanup() {
-            if (commit) {
+        private void cleanup(ProviderException failure) {
+            if (!commit) {
+                postRollback();
+            } else if (failure == null) {
                 postCommit();
             } else {
-                postRollback();
+                postFailedCommit(failure instanceof ProviderTransactionRolledBackException);
             }
         }
     }
