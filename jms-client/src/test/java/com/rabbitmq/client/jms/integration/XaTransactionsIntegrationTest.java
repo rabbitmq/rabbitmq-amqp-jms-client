@@ -380,10 +380,17 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             // The broker rolls back the branch when it detaches the control link.
             Binary txnId3 = new Binary(new byte[] { 9 });
             expectXaDeclare(testPeer, detached, txnId3);
-            testPeer.remotelyCloseLastCoordinatorLink();
             resource.start(detached, XAResource.TMNOFLAGS);
+            testPeer.expectReceiverAttach();
+            testPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), 1);
+            testPeer.expectDisposition(false, new TransactionalStateMatcher().withTxnId(equalTo(txnId3)));
+            testPeer.remotelyCloseLastCoordinatorLink();
+            connection.start();
+            MessageConsumer consumer = session.createConsumer(session.createQueue("myQueue"));
+            assertNotNull(consumer.receive(3000));
             testPeer.waitForAllHandlersToComplete(2000);
             resource.end(detached, XAResource.TMSUCCESS);
+            testPeer.expectDisposition(true, new ModifiedMatcher().withDeliveryFailed(equalTo(true)));
             assertXaError(XAException.XA_RBROLLBACK, () -> resource.prepare(detached));
 
             testPeer.expectClose();
