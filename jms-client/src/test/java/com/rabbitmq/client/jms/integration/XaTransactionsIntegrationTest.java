@@ -40,7 +40,10 @@ import javax.transaction.xa.Xid;
 
 import jakarta.jms.MessageConsumer;
 import jakarta.jms.MessageProducer;
+import jakarta.jms.JMSContext;
 import jakarta.jms.TransactionInProgressException;
+import jakarta.jms.TransactionInProgressRuntimeException;
+import jakarta.jms.XAJMSContext;
 import jakarta.jms.XASession;
 
 import com.rabbitmq.client.jms.JmsConnection;
@@ -287,6 +290,50 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
 
             testPeer.expectClose();
             connection.close();
+
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testXaContextCommitsInTwoPhases() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            Xid xid = new TestXid(1);
+
+            testPeer.expectSaslPlain("guest", "guest");
+            testPeer.expectOpen();
+            testPeer.expectBegin();
+            String uri = testFixture.buildURI(testPeer, false, null);
+            XAJMSContext context = new JmsConnectionFactory(uri).createXAContext("guest", "guest");
+            assertTrue(context.getTransacted());
+            assertEquals(JMSContext.SESSION_TRANSACTED, context.getSessionMode());
+            assertTrue(context.getContext() == context);
+
+            testPeer.expectBegin();
+            XAResource resource = context.getXAResource();
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, xid, TXN_ID_1);
+            resource.start(xid, XAResource.TMNOFLAGS);
+
+            testPeer.expectSenderAttach();
+            TransactionalStateMatcher inBranch = new TransactionalStateMatcher().withTxnId(equalTo(TXN_ID_1));
+            testPeer.expectTransfer(textMessage("m1"), inBranch,
+                                    new TransactionalState().setTxnId(TXN_ID_1).setOutcome(new Accepted()), true);
+            context.createProducer().send(context.createQueue("myQueue"), "m1");
+
+            assertThrows(TransactionInProgressRuntimeException.class, context::commit);
+            assertThrows(TransactionInProgressRuntimeException.class, context::rollback);
+
+            resource.end(xid, XAResource.TMSUCCESS);
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_1, new Accepted());
+            assertEquals(XAResource.XA_OK, resource.prepare(xid));
+            expectXaControl(testPeer, XA_COMMIT, xid(xid), new Accepted());
+            resource.commit(xid, false);
+
+            testPeer.expectEnd();
+            testPeer.expectClose();
+            context.close();
 
             testPeer.waitForAllHandlersToComplete(1000);
         }
