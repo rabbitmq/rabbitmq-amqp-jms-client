@@ -30,7 +30,6 @@ import jakarta.jms.ConnectionFactory;
 import jakarta.jms.ExceptionListener;
 import jakarta.jms.JMSContext;
 import jakarta.jms.JMSException;
-import jakarta.jms.JMSRuntimeException;
 import jakarta.jms.MessageListener;
 import jakarta.jms.QueueConnection;
 import jakarta.jms.QueueConnectionFactory;
@@ -259,12 +258,16 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
 
     @Override
     public XAJMSContext createXAContext() {
-        throw new JMSRuntimeException("XA contexts are not supported, use an XA connection");
+        return createXAContext(getUsername(), getPassword());
     }
 
     @Override
     public XAJMSContext createXAContext(String username, String password) {
-        throw new JMSRuntimeException("XA contexts are not supported, use an XA connection");
+        try {
+            return new JmsXAContext((JmsXAConnection) createXAConnection(username, password));
+        } catch (JMSException jmse) {
+            throw JmsExceptionSupport.createRuntimeException(jmse);
+        }
     }
 
     @Override
