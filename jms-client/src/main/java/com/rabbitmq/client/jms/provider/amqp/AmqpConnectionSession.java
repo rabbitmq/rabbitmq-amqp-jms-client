@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.rabbitmq.client.jms.meta.JmsSessionInfo;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
 import com.rabbitmq.client.jms.provider.AsyncResult;
 import com.rabbitmq.client.jms.provider.NoOpAsyncResult;
 import com.rabbitmq.client.jms.provider.ProviderException;
@@ -47,6 +48,7 @@ public class AmqpConnectionSession extends AmqpSession {
     private static final Logger LOG = LoggerFactory.getLogger(AmqpConnectionSession.class);
 
     private final Map<String, AsyncResult> pendingUnsubs = new HashMap<String, AsyncResult>();
+    private AmqpTransactionContext xaContext;
 
     /**
      * Create a new instance of a Connection owned Session object.
@@ -82,6 +84,19 @@ public class AmqpConnectionSession extends AmqpSession {
 
         LOG.debug("Attempting remove of subscription: {}", subscriptionName);
         builder.buildResource(subscribeRequest);
+    }
+
+    /**
+     * Runs the XA operations that any session can run, for a session that has been closed.
+     */
+    @Override
+    public void xa(JmsXaRequest xaRequest, AsyncResult request) throws Exception {
+        if (xaContext == null) {
+            JmsSessionInfo xaInfo = getResourceInfo().copy();
+            xaInfo.setXa(true);
+            xaContext = new AmqpTransactionContext(this, xaInfo);
+        }
+        xaContext.xa(xaRequest, request);
     }
 
     @Override

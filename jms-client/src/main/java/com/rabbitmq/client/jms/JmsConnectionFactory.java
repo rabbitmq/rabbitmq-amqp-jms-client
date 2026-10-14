@@ -35,6 +35,9 @@ import jakarta.jms.QueueConnection;
 import jakarta.jms.QueueConnectionFactory;
 import jakarta.jms.TopicConnection;
 import jakarta.jms.TopicConnectionFactory;
+import jakarta.jms.XAConnection;
+import jakarta.jms.XAConnectionFactory;
+import jakarta.jms.XAJMSContext;
 import javax.net.ssl.SSLContext;
 
 import com.rabbitmq.client.jms.exceptions.JmsExceptionSupport;
@@ -66,7 +69,7 @@ import org.slf4j.LoggerFactory;
 /**
  * JMS ConnectionFactory Implementation.
  */
-public class JmsConnectionFactory extends JNDIStorable implements ConnectionFactory, QueueConnectionFactory, TopicConnectionFactory {
+public class JmsConnectionFactory extends JNDIStorable implements ConnectionFactory, QueueConnectionFactory, TopicConnectionFactory, XAConnectionFactory {
 
     private static final Logger LOG = LoggerFactory.getLogger(JmsConnectionFactory.class);
 
@@ -101,6 +104,7 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
     private boolean useDaemonThread = false;
     private long sendTimeout = JmsConnectionInfo.DEFAULT_SEND_TIMEOUT;
     private long requestTimeout = JmsConnectionInfo.DEFAULT_REQUEST_TIMEOUT;
+    private long xaRequestTimeout = JmsConnectionInfo.DEFAULT_XA_REQUEST_TIMEOUT;
     private long closeTimeout = JmsConnectionInfo.DEFAULT_CLOSE_TIMEOUT;
     private long connectTimeout = JmsConnectionInfo.DEFAULT_CONNECT_TIMEOUT;
     private IdGenerator clientIdGenerator;
@@ -222,6 +226,48 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
         }
 
         return connection;
+    }
+
+    @Override
+    public XAConnection createXAConnection() throws JMSException {
+        return createXAConnection(getUsername(), getPassword());
+    }
+
+    @Override
+    public XAConnection createXAConnection(String username, String password) throws JMSException {
+        JmsXAConnection connection = null;
+
+        try {
+            JmsConnectionInfo connectionInfo = configureConnectionInfo(username, password);
+            Provider provider = createProvider(remoteURI);
+
+            connection = new JmsXAConnection(connectionInfo, provider);
+            connection.setExceptionListener(exceptionListener);
+            connection.connect();
+        } catch (Exception e) {
+            if (connection != null) {
+                try {
+                    connection.close();
+                } catch (Throwable ignored) {}
+            }
+            throw JmsExceptionSupport.create(e);
+        }
+
+        return connection;
+    }
+
+    @Override
+    public XAJMSContext createXAContext() {
+        return createXAContext(getUsername(), getPassword());
+    }
+
+    @Override
+    public XAJMSContext createXAContext(String username, String password) {
+        try {
+            return new JmsXAContext((JmsXAConnection) createXAConnection(username, password));
+        } catch (JMSException jmse) {
+            throw JmsExceptionSupport.createRuntimeException(jmse);
+        }
     }
 
     @Override
@@ -633,6 +679,14 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
 
     public void setRequestTimeout(long requestTimeout) {
         this.requestTimeout = requestTimeout;
+    }
+
+    public long getXaRequestTimeout() {
+        return xaRequestTimeout;
+    }
+
+    public void setXaRequestTimeout(long xaRequestTimeout) {
+        this.xaRequestTimeout = xaRequestTimeout;
     }
 
     public JmsPrefetchPolicy getPrefetchPolicy() {

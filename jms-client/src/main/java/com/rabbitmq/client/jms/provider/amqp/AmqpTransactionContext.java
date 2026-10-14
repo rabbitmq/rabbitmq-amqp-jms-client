@@ -17,14 +17,21 @@
 package com.rabbitmq.client.jms.provider.amqp;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+
+import javax.transaction.xa.XAException;
 
 import com.rabbitmq.client.jms.meta.JmsConsumerId;
 import com.rabbitmq.client.jms.meta.JmsProducerId;
 import com.rabbitmq.client.jms.meta.JmsSessionInfo;
 import com.rabbitmq.client.jms.meta.JmsTransactionId;
 import com.rabbitmq.client.jms.meta.JmsTransactionInfo;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderXaException;
 import com.rabbitmq.client.jms.provider.AsyncResult;
+import com.rabbitmq.client.jms.provider.NoOpAsyncResult;
 import com.rabbitmq.client.jms.provider.ProviderException;
 import com.rabbitmq.client.jms.provider.amqp.builders.AmqpTransactionCoordinatorBuilder;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderIllegalStateException;
@@ -46,6 +53,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     private static final Logger LOG = LoggerFactory.getLogger(AmqpTransactionContext.class);
 
     private final AmqpSession session;
+    private final JmsSessionInfo resourceInfo;
     private final Map<JmsConsumerId, AmqpConsumer> txConsumers = new HashMap<>();
     private final Map<JmsProducerId, AmqpProducer> txProducers = new HashMap<>();
 
@@ -64,6 +72,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
      */
     public AmqpTransactionContext(AmqpSession session, JmsSessionInfo resourceInfo) {
         this.session = session;
+        this.resourceInfo = resourceInfo;
     }
 
     public void begin(final JmsTransactionId txId, final AsyncResult request) throws ProviderException {
@@ -190,6 +199,271 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         }
     }
 
+    //----- XA ---------------------------------------------------------------//
+
+    private final Map<String, JmsTransactionId> xaBranches = new HashMap<>();
+    // Branches that the remote peer rolled back when it detached the control link.
+    private final Set<String> rolledBackBranches = new HashSet<>();
+    private boolean inUnknownBranch;
+
+    private interface XaAction {
+        void run() throws ProviderException;
+    }
+
+    /**
+     * Runs an operation on an XA branch. The session is not in a transaction unless a branch
+     * has been started and not ended, which means that the work of the session is not
+     * transactional in between.
+     *
+     * The JMS XA resource checks the state of the branches. This context only keeps the
+     * transactions of the branches of the session that have not been prepared.
+     *
+     * @param xaRequest
+     *        describes the operation.
+     * @param result
+     *        the request to signal when the operation completes.
+     *
+     * @throws ProviderException if the operation cannot be started.
+     */
+    public void xa(final JmsXaRequest xaRequest, final AsyncResult result) throws ProviderException {
+        if (coordinator != null && coordinator.isClosed() && !xaBranches.isEmpty()) {
+            // "If the control link is closed while there exist non-discharged transactions
+            // it created, then all such transactions are immediately rolled back" [4.1]
+            rolledBackBranches.addAll(xaBranches.keySet());
+            xaBranches.clear();
+            for (AmqpConsumer consumer : txConsumers.values()) {
+                consumer.giveBackTransactedDeliveries();
+            }
+            txConsumers.clear();
+            txProducers.clear();
+        }
+        final String key = xaRequest.getKey();
+        final JmsTransactionId txId = key == null ? null : xaBranches.get(key);
+
+        switch (xaRequest.getType()) {
+            case START:
+                xaStart(xaRequest, result);
+                break;
+            case RESUME:
+                // After a reconnect the branch is unknown, so the work of the session is dropped until it ends.
+                setCurrent(txId);
+                inUnknownBranch = txId == null;
+                result.onSuccess();
+                break;
+            case END:
+                boolean lost = isTransactionInDoubt();
+                setCurrent(null);
+                if (lost) {
+                    postLostBranch();
+                }
+                result.onSuccess();
+                break;
+            case PREPARE:
+                if (txId == null) {
+                    result.onFailure(unknownBranch(key, xaRequest));
+                    break;
+                }
+                preCommit();
+                withCoordinator(result, () -> coordinator.xaPrepare(amqpTransactionId(txId), xaRequest,
+                    new BranchCompletion(key, result)));
+                break;
+            case COMMIT_ONE_PHASE:
+                if (txId == null) {
+                    result.onFailure(unknownBranch(key, xaRequest));
+                    break;
+                }
+                preCommit();
+                withCoordinator(result, () -> coordinator.xaDischarge(amqpTransactionId(txId), false, xaRequest,
+                    new BranchCompletion(key, result)));
+                break;
+            case ROLLBACK:
+                if (txId == null && rolledBackBranches.remove(key)) {
+                    result.onSuccess();
+                    break;
+                }
+                if (txId == null) {
+                    withCoordinator(result, () -> coordinator.xaRollback(xaRequest.getXid(), xaRequest,
+                        new XaCompletion(result)));
+                    break;
+                }
+                if (txId.equals(current)) {
+                    setCurrent(null);
+                }
+                preRollback();
+                withCoordinator(result, () -> coordinator.xaDischarge(amqpTransactionId(txId), true, xaRequest,
+                    new BranchCompletion(key, result)));
+                break;
+            case COMMIT:
+                withCoordinator(result, () -> coordinator.xaCommit(xaRequest.getXid(), xaRequest,
+                    new XaCompletion(result)));
+                break;
+            case FORGET:
+                withCoordinator(result, () -> coordinator.xaForget(xaRequest.getXid(), xaRequest,
+                    new XaCompletion(result)));
+                break;
+            case RECOVER:
+                withCoordinator(result, () -> coordinator.xaRecover(xaRequest.getStartAfter(), xaRequest,
+                    new XaCompletion(result)));
+                break;
+            default:
+                throw new ProviderIllegalStateException("Unknown XA request " + xaRequest);
+        }
+    }
+
+    private void xaStart(final JmsXaRequest xaRequest, final AsyncResult result) {
+        final JmsTransactionId txId = xaRequest.getTransactionId();
+        withCoordinator(result, () -> coordinator.xaDeclare(txId, xaRequest.getXid(), xaRequest, new XaCompletion(result) {
+            @Override
+            public void onSuccess() {
+                // A reply after the request has timed out does not associate the session.
+                if (!result.isComplete()) {
+                    xaBranches.put(xaRequest.getKey(), txId);
+                    setCurrent(txId);
+                    super.onSuccess();
+                } else {
+                    // The broker holds the transaction as the one of the session, and
+                    // would refuse the next start.
+                    rollbackLateBranch(xaRequest, txId);
+                }
+            }
+        }));
+    }
+
+    private ProviderXaException unknownBranch(String key, JmsXaRequest xaRequest) {
+        if (rolledBackBranches.remove(key)) {
+            return new ProviderXaException(XAException.XA_RBROLLBACK,
+                "Branch rolled back when the control link was detached " + xaRequest);
+        }
+        return new ProviderXaException(XAException.XAER_NOTA, "Unknown branch " + xaRequest);
+    }
+
+    private void rollbackLateBranch(JmsXaRequest start, JmsTransactionId txId) {
+        JmsXaRequest rollback = new JmsXaRequest(JmsXaRequest.Type.ROLLBACK, start.getSessionId(),
+                                                 start.getXid(), start.getKey());
+        try {
+            coordinator.xaDischarge(amqpTransactionId(txId), true, rollback, NoOpAsyncResult.INSTANCE);
+        } catch (ProviderException e) {
+            LOG.debug("{} Failed to roll back the branch of a start that timed out: {}", this, e.getMessage());
+        }
+    }
+
+    private static Binary amqpTransactionId(JmsTransactionId txId) {
+        return (Binary) txId.getProviderHint();
+    }
+
+    private void setCurrent(JmsTransactionId txId) {
+        current = txId;
+        inUnknownBranch = false;
+        if (txId == null) {
+            cachedAcceptedState = null;
+            cachedTransactedState = null;
+        } else {
+            cachedAcceptedState = new TransactionalState();
+            cachedAcceptedState.setOutcome(Accepted.getInstance());
+            cachedAcceptedState.setTxnId(getAmqpTransactionId());
+            cachedTransactedState = new TransactionalState();
+            cachedTransactedState.setTxnId(getAmqpTransactionId());
+        }
+    }
+
+    private void withCoordinator(final AsyncResult request, final XaAction action) {
+        if (coordinator == null || coordinator.isClosed()) {
+            AmqpTransactionCoordinatorBuilder builder =
+                new AmqpTransactionCoordinatorBuilder(this, resourceInfo);
+            builder.buildResource(new AsyncResult() {
+
+                @Override
+                public void onSuccess() {
+                    run();
+                }
+
+                @Override
+                public void onFailure(ProviderException result) {
+                    request.onFailure(new ProviderXaException(XAException.XAER_RMERR,
+                        "The broker does not support XA transactions: " + result.getMessage(), result));
+                }
+
+                @Override
+                public boolean isComplete() {
+                    return request.isComplete();
+                }
+
+                private void run() {
+                    try {
+                        action.run();
+                    } catch (ProviderException e) {
+                        request.onFailure(e);
+                    }
+                }
+            });
+        } else {
+            try {
+                action.run();
+            } catch (ProviderException e) {
+                request.onFailure(e);
+            }
+        }
+    }
+
+    /**
+     * Passes the outcome of a request to the coordinator on to the original request.
+     */
+    private static class XaCompletion implements AsyncResult {
+
+        private final AsyncResult request;
+
+        private XaCompletion(AsyncResult request) {
+            this.request = request;
+        }
+
+        @Override
+        public void onSuccess() {
+            request.onSuccess();
+        }
+
+        @Override
+        public void onFailure(ProviderException result) {
+            request.onFailure(result);
+        }
+
+        @Override
+        public boolean isComplete() {
+            return request.isComplete();
+        }
+    }
+
+    /**
+     * Ends the transaction of a branch of this session that has not been prepared.
+     */
+    private final class BranchCompletion extends XaCompletion {
+
+        private final String key;
+
+        private BranchCompletion(String key, AsyncResult request) {
+            super(request);
+            this.key = key;
+        }
+
+        @Override
+        public void onSuccess() {
+            endBranch();
+            super.onSuccess();
+        }
+
+        @Override
+        public void onFailure(ProviderException result) {
+            endBranch();
+            super.onFailure(result);
+        }
+
+        private void endBranch() {
+            xaBranches.remove(key);
+            // Another session can complete a prepared branch, and the broker returns the
+            // messages of a branch that rolled back to the queue, so the deliveries are settled.
+            postCommit();
+        }
+    }
+
     //----- Context utility methods ------------------------------------------//
 
     public void registerTxConsumer(AmqpConsumer consumer) {
@@ -225,6 +499,10 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     }
 
     public boolean isTransactionInDoubt() {
+        if (session.getResourceInfo().isXa()) {
+            // Outside of a branch, the work is not transactional.
+            return inUnknownBranch || current != null && (coordinator == null || coordinator.isClosed());
+        }
         // A context either has an active transaction or the transaction state of all
         // operations is in-doubt and cannot proceed as normal.
         return coordinator == null ? true : coordinator.isClosed();
@@ -269,6 +547,23 @@ public class AmqpTransactionContext implements AmqpResourceParent {
     private void postRollback() {
         for (AmqpConsumer consumer : txConsumers.values()) {
             consumer.postRollback();
+        }
+
+        txConsumers.clear();
+        txProducers.clear();
+    }
+
+    // The consumers stay registered for another branch of the session that has not
+    // been prepared yet.
+    private void postLostBranch() {
+        for (AmqpConsumer consumer : txConsumers.values()) {
+            consumer.postLostBranch();
+        }
+    }
+
+    private void postFailedCommit(boolean rolledBack) {
+        for (AmqpConsumer consumer : txConsumers.values()) {
+            consumer.postFailedCommit(rolledBack);
         }
 
         txConsumers.clear();
@@ -391,7 +686,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         }
 
         public void onDischargeSuccess() {
-            cleanup();
+            cleanup(null);
 
             // If the declare already returned a result we can proceed otherwise
             // we need to wait for it finish in order to get the correct outcome.
@@ -419,7 +714,7 @@ public class AmqpTransactionContext implements AmqpResourceParent {
         }
 
         public void onDischargeFailure(ProviderException failure) {
-            cleanup();
+            cleanup(failure);
 
             // If the declare already returned a result we can proceed otherwise
             // we need to wait for it finish in order to get the correct outcome.
@@ -430,11 +725,13 @@ public class AmqpTransactionContext implements AmqpResourceParent {
             }
         }
 
-        private void cleanup() {
-            if (commit) {
+        private void cleanup(ProviderException failure) {
+            if (!commit) {
+                postRollback();
+            } else if (failure == null) {
                 postCommit();
             } else {
-                postRollback();
+                postFailedCommit(failure instanceof ProviderTransactionRolledBackException);
             }
         }
     }

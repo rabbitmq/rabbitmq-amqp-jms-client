@@ -70,6 +70,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     // until the transaction commits, because they remain acquired by us if it
     // rolls back.
     private final List<Delivery> transactedDeliveries = new ArrayList<>();
+    // Deliveries acknowledged in an XA branch that a reconnect has lost.
+    private final List<Delivery> lostBranchDeliveries = new ArrayList<>();
 
     public AmqpConsumer(AmqpSession session, JmsConsumerInfo info, Receiver receiver) {
         super(info, receiver, session);
@@ -96,7 +98,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
         if (acknowledgementMode == Session.CLIENT_ACKNOWLEDGE
                 || acknowledgementMode == Session.AUTO_ACKNOWLEDGE
                     || acknowledgementMode == Session.DUPS_OK_ACKNOWLEDGE
-                        || acknowledgementMode == INDIVIDUAL_ACKNOWLEDGE) {
+                        || acknowledgementMode == INDIVIDUAL_ACKNOWLEDGE
+                            || acknowledgementMode == Session.SESSION_TRANSACTED) {
             // Send dispositions for any messages which were previously delivered and
             // session recovered, but were then not delivered again afterwards.
             Delivery delivery = getEndpoint().head();
@@ -354,6 +357,10 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
         if (!delivery.remotelySettled()) {
             if (session.isTransacted() && !getResourceInfo().isBrowser()) {
                 if (session.isTransactionInDoubt()) {
+                    if (session.getResourceInfo().isXa()) {
+                        lostBranchDeliveries.add(delivery);
+                        session.getTransactionContext().registerTxConsumer(this);
+                    }
                     LOG.trace("Skipping ack of message {} in failed transaction.", envelope);
                     return;
                 }
@@ -364,6 +371,10 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
                     transactedDeliveries.add(delivery);
                     transacted = true;
                     session.getTransactionContext().registerTxConsumer(this);
+                } else if (session.getResourceInfo().isXa()) {
+                    // An XA session is not in a transaction outside of a branch.
+                    delivery.disposition(Accepted.getInstance());
+                    delivery.settle();
                 }
             } else {
                 delivery.disposition(Accepted.getInstance());
@@ -698,6 +709,45 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     }
 
     /**
+     * A branch that a reconnect has lost rolls back, so the messages acknowledged in it
+     * go back to the remote peer once it ends.
+     */
+    public void postLostBranch() {
+        for (Delivery delivery : lostBranchDeliveries) {
+            handleDisposition((JmsInboundMessageDispatch) delivery.getContext(), delivery, MODIFIED_FAILED);
+        }
+        lostBranchDeliveries.clear();
+        tryCompleteDeferredClose();
+    }
+
+    /**
+     * After a commit that the remote peer rolled back, the messages acknowledged in the
+     * transaction are still acquired by us, so we deliver them again. If the outcome is
+     * not known, we give them back.
+     */
+    public void postFailedCommit(boolean rolledBack) {
+        if (rolledBack) {
+            redeliverTransactedDeliveries();
+            tryCompleteDeferredClose();
+        } else {
+            giveBackTransactedDeliveries();
+        }
+    }
+
+    /**
+     * Gives the messages acknowledged in the transaction back to the remote peer, which
+     * ignores this for deliveries that it has settled.
+     */
+    public void giveBackTransactedDeliveries() {
+        for (Delivery delivery : transactedDeliveries) {
+            delivery.disposition(MODIFIED_FAILED);
+            delivery.settle();
+        }
+        transactedDeliveries.clear();
+        tryCompleteDeferredClose();
+    }
+
+    /**
      * After a rollback, the messages acknowledged in the transaction are still
      * acquired by us, so we deliver them again, as a session recover does.
      * A consumer that is closing gives them back to the remote peer instead.
@@ -788,7 +838,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
             if (current.getContext() instanceof JmsInboundMessageDispatch) {
                 JmsInboundMessageDispatch envelope = (JmsInboundMessageDispatch) current.getContext();
                 if (!envelope.isDelivered()) {
-                    handleDisposition(envelope, current, Released.getInstance());
+                    // A recovered message was delivered before, so it counts as a failed delivery.
+                    handleDisposition(envelope, current, envelope.isRecovered() ? MODIFIED_FAILED : Released.getInstance());
                 }
             } else {
                 LOG.debug("{} Found incomplete delivery with no context during release processing", AmqpConsumer.this);

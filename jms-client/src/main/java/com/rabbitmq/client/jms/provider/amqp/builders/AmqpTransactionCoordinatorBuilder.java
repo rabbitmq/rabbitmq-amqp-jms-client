@@ -36,6 +36,9 @@ import org.apache.qpid.proton.engine.Sender;
  */
 public class AmqpTransactionCoordinatorBuilder extends AmqpResourceBuilder<AmqpTransactionCoordinator, AmqpTransactionContext, JmsSessionInfo, Sender> {
 
+    private static final Symbol XA_CAPABILITY = Symbol.valueOf("rabbitmq:xa");
+
+
     public AmqpTransactionCoordinatorBuilder(AmqpTransactionContext parent, JmsSessionInfo resourceInfo) {
         super(parent, resourceInfo);
     }
@@ -43,7 +46,11 @@ public class AmqpTransactionCoordinatorBuilder extends AmqpResourceBuilder<AmqpT
     @Override
     protected Sender createEndpoint(JmsSessionInfo resourceInfo) {
         Coordinator coordinator = new Coordinator();
-        coordinator.setCapabilities(TxnCapability.LOCAL_TXN);
+        if (resourceInfo.isXa()) {
+            coordinator.setCapabilities(TxnCapability.LOCAL_TXN, XA_CAPABILITY);
+        } else {
+            coordinator.setCapabilities(TxnCapability.LOCAL_TXN);
+        }
 
         Symbol[] outcomes = new Symbol[]{ Accepted.DESCRIPTOR_SYMBOL, Rejected.DESCRIPTOR_SYMBOL, Released.DESCRIPTOR_SYMBOL, Modified.DESCRIPTOR_SYMBOL };
 
@@ -64,6 +71,26 @@ public class AmqpTransactionCoordinatorBuilder extends AmqpResourceBuilder<AmqpT
     @Override
     protected AmqpTransactionCoordinator createResource(AmqpTransactionContext parent, JmsSessionInfo resourceInfo, Sender endpoint) {
         return new AmqpTransactionCoordinator(resourceInfo, endpoint, parent);
+    }
+
+    @Override
+    protected boolean isOpenedEndpointValid() {
+        if (!resourceInfo.isXa()) {
+            return true;
+        }
+        Object remoteTarget = getEndpoint().getRemoteTarget();
+        if (remoteTarget instanceof Coordinator) {
+            Symbol[] capabilities = ((Coordinator) remoteTarget).getCapabilities();
+            if (capabilities != null) {
+                for (Symbol capability : capabilities) {
+                    if (XA_CAPABILITY.equals(capability)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // The broker does not support XA.
+        return false;
     }
 
     @Override

@@ -476,12 +476,16 @@ public class JmsContext implements JMSContext, AutoCloseable {
 
     //----- Internal implementation methods ----------------------------------//
 
-    private JmsSession getSession() {
+    protected JmsSession createSession(JmsConnection connection, int sessionMode) throws JMSException {
+        return (JmsSession) connection.createSession(sessionMode);
+    }
+
+    protected JmsSession getSession() {
         if (session == null) {
             synchronized (this) {
                 if (session == null) {
                     try {
-                        session = (JmsSession) connection.createSession(getSessionMode());
+                        session = createSession(connection, getSessionMode());
                     } catch (JMSException jmse) {
                         throw JmsExceptionSupport.createRuntimeException(jmse);
                     }

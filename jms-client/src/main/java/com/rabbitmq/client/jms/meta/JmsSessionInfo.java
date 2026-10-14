@@ -34,6 +34,7 @@ public final class JmsSessionInfo extends JmsAbstractResource implements Compara
     private final JmsSessionId sessionId;
 
     private int acknowledgementMode;
+    private boolean xa;
     private boolean sendAcksAsync;
     private JmsMessageIDPolicy messageIDPolicy;
     private JmsPrefetchPolicy prefetchPolicy;
@@ -64,6 +65,7 @@ public final class JmsSessionInfo extends JmsAbstractResource implements Compara
 
     private void copy(JmsSessionInfo copy) {
         copy.acknowledgementMode = acknowledgementMode;
+        copy.xa = xa;
         copy.sendAcksAsync = sendAcksAsync;
         copy.redeliveryPolicy = getRedeliveryPolicy().copy();
         copy.presettlePolicy = getPresettlePolicy().copy();
@@ -88,6 +90,17 @@ public final class JmsSessionInfo extends JmsAbstractResource implements Compara
 
     public void setAcknowledgementMode(int acknowledgementMode) {
         this.acknowledgementMode = acknowledgementMode;
+    }
+
+    /**
+     * @return whether the session takes part in XA transactions
+     */
+    public boolean isXa() {
+        return xa;
+    }
+
+    public void setXa(boolean xa) {
+        this.xa = xa;
     }
 
     public boolean isTransacted() {

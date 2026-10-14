@@ -78,6 +78,7 @@ public class JmsConnectionInfoTest {
         info.setPassword("pass");
         info.setQueuePrefix("queue");
         info.setRequestTimeout(50);
+        info.setXaRequestTimeout(250);
         info.setSendTimeout(150);
         info.setTopicPrefix("topic");
         info.setUsername("user");
@@ -104,6 +105,7 @@ public class JmsConnectionInfoTest {
         assertEquals("pass", copy.getPassword());
         assertEquals("queue", copy.getQueuePrefix());
         assertEquals(50, copy.getRequestTimeout());
+        assertEquals(250, copy.getXaRequestTimeout());
         assertEquals(150, copy.getSendTimeout());
         assertEquals("topic", copy.getTopicPrefix());
         assertEquals("user", copy.getUsername());
