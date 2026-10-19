@@ -36,7 +36,6 @@
             <sectanchors>true</sectanchors>
             <idprefix />
             <idseparator>-</idseparator>
-            <webfonts>false</webfonts>
             <reproducible>true</reproducible>
             <attribute-missing>warn</attribute-missing>
           </attributes>
