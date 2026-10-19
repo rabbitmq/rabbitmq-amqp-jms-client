@@ -13,7 +13,8 @@ ci/build-documentation.sh
 ```
 
 Open `docs/target/htmlsingle/index.html` in a browser. The HTML embeds its stylesheet
-and does not require online fonts or scripts.
+and loads Asciidoctor's default fonts from Google Fonts, matching the AMQP 1.0 Java
+client guide. Offline viewing uses locally available fallback fonts.
 
 The build reads the library version, Maven coordinates, and Java baseline from the
 root and client POMs, and writes generated AsciiDoc attributes under `docs/target`.
