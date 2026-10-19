@@ -92,7 +92,10 @@ consult the README in the jms-client-examples module itself.
 
 ## Documentation
 
-Documentation source can be found in the jms-client-docs module.
+The [RabbitMQ AMQP JMS Client guide](https://rabbitmq.github.io/rabbitmq-amqp-jms-client/)
+is published for releases and development snapshots.
+Its AsciiDoc source and [build instructions](docs/README.md) are in `docs/`.
+The upstream client configuration reference remains in `jms-client-docs`.
 
 ## Distribution assemblies
 
