@@ -57,7 +57,21 @@ find . -path ./.git -prune -o -path '*/target' -prune -o \
   rmdir "$base/org/apache/qpid" "$base/org/apache" "$base/org" 2>/dev/null || true
 done
 
-# 5. Sanity check
+# 5. Skip push builds on intermediate branches, where revision is not defined.
+# Keep this in sync with the fork's build workflow. Fail if upstream changes the
+# trigger format so we review it instead of silently dropping the branch filter.
+perl -0777 -pi -e '
+  s{^on: \[push, pull_request, workflow_dispatch\]$}{on:
+  push:
+    branches-ignore:
+      - "upstream-renamed*"
+    tags:
+      - "**"
+  pull_request:
+  workflow_dispatch:}m or die "error: unexpected build workflow triggers\n";
+' .github/workflows/build.yml
+
+# 6. Sanity check
 leftovers=$(git grep -lI --untracked -E 'org[./]apache[./]qpid[./]jms|\bqpid-jms-(client|discovery|docs|examples|interop-tests|activemq-tests|parent)\b' -- . || true)
 if [[ -n "$leftovers" ]]; then
   echo "warning: old names still present in:" >&2

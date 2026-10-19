@@ -81,7 +81,10 @@ Runs at the root of an unmodified upstream tree and transforms it in place:
 2. Replaces project versions with `${revision}` and the SCM tag with `HEAD` in POMs.
 3. Moves module directories (`qpid-jms-client` → `jms-client`, ...).
 4. Moves package directories (`org/apache/qpid/jms` → `com/rabbitmq/client/jms`).
-5. Checks that no old name is left and that all POMs use `${revision}`, fails otherwise.
+5. Excludes `upstream-renamed*` branches from push builds in the build workflow.
+   These intermediate trees use `${revision}` without the fork's definition. Builds
+   for other branches, tags, pull requests and manual runs remain enabled.
+6. Checks that no old name is left and that all POMs use `${revision}`, fails otherwise.
 
 The output must stay deterministic: the same upstream tree always gives the same result.
 The module list is hard-coded: if upstream adds, removes, or renames a module, the script
@@ -96,10 +99,31 @@ Adds a commit to `upstream-renamed` (default) or `upstream-renamed-1.x`:
    so your current checkout is not touched.
 3. Replaces the content with the upstream ref (`git read-tree -u --reset <sha>`: sets the files
    and the index to the exact upstream tree, without moving the branch).
-4. Runs `rename.sh` and commits.
+4. Runs `rename.sh` and commits if the transformed tree differs from the renamed branch.
 
-It does nothing if the ref is already synced. It does not merge nor push.
+It reapplies the transformation even if the ref is already synced, so changes to
+`rename.sh` can be applied without waiting for a new upstream commit. If the resulting
+tree is unchanged, it creates no commit. It does not merge nor push.
 It uses the `rename.sh` of your current checkout.
+
+After changing the transformation, commit it on `main` and cherry-pick that commit
+to `1.x`. Rerun the sync on each branch using its last synced upstream commit, then
+merge and push as usual. This updates the generated branches without bringing in
+unrelated upstream changes:
+
+```bash
+# On main, after committing the script changes:
+upstream_ref=$(git log -1 --format='%(trailers:key=Upstream-Commit,valueonly)' upstream-renamed)
+scripts/sync-upstream.sh "$upstream_ref"
+git merge upstream-renamed
+git push origin main upstream-renamed
+
+# On 1.x, after cherry-picking the script changes:
+upstream_ref=$(git log -1 --format='%(trailers:key=Upstream-Commit,valueonly)' upstream-renamed-1.x)
+scripts/sync-upstream.sh "$upstream_ref" upstream-renamed-1.x
+git merge upstream-renamed-1.x
+git push origin 1.x upstream-renamed-1.x
+```
 
 ## When to sync
 
