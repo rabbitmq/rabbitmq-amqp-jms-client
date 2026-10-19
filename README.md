@@ -3,6 +3,11 @@
 RabbitMQ AMQP JMS Client is a JMS client that uses the AMQP 1.0 protocol, enabling it
 to interact with RabbitMQ and other AMQP 1.0 servers.
 
+Please refer to the documentation for your client line:
+
+* [2.x (`main`): Jakarta Messaging 3.1, `jakarta.jms`](https://rabbitmq.github.io/rabbitmq-amqp-jms-client/2.x/snapshot/htmlsingle/)
+* [1.x: JMS 2.0, `javax.jms`](https://rabbitmq.github.io/rabbitmq-amqp-jms-client/1.x/snapshot/htmlsingle/)
+
 It is a fork of [Apache Qpid JMS](https://github.com/apache/qpid-jms), released under
 the same license ([Apache License 2.0](LICENSE)).
 It is not affiliated with or endorsed by the Apache Software Foundation.
@@ -10,45 +15,14 @@ It is not affiliated with or endorsed by the Apache Software Foundation.
 Not to be confused with the [RabbitMQ JMS Client](https://github.com/rabbitmq/rabbitmq-jms-client),
 which uses AMQP 0-9-1.
 
-## Maven coordinates
+## Adding the dependency
 
-### Stable Release
+See the documentation for Maven and Gradle dependency setup, including the snapshot repository:
 
-NB: no stable release yet
+* [2.x (`main`): Jakarta Messaging 3.1, `jakarta.jms`](https://rabbitmq.github.io/rabbitmq-amqp-jms-client/2.x/snapshot/htmlsingle/#dependency)
+* [1.x: JMS 2.0, `javax.jms`](https://rabbitmq.github.io/rabbitmq-amqp-jms-client/1.x/snapshot/htmlsingle/#dependency)
 
-```xml
-<dependency>
-  <groupId>com.rabbitmq.client</groupId>
-  <artifactId>jms-client</artifactId>
-  <version>${jms-client.version}</version>
-</dependency>
-```
-
-The root package is `com.rabbitmq.client.jms`. Classes keep their upstream names,
-e.g. the JNDI initial context factory is `com.rabbitmq.client.jms.jndi.JmsInitialContextFactory`.
-
-### Snapshots
-
-```xml
-<dependency>
-  <groupId>com.rabbitmq.client</groupId>
-  <artifactId>jms-client</artifactId>
-  <version>2.12.0-SNAPSHOT</version>
-</dependency>
-```
-
-Add the [snapshot repository](https://central.sonatype.com/repository/maven-snapshots/) to your dependency manager:
-
-```xml
-<repositories>
-  <repository>
-    <id>central-portal-snapshots</id>
-    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
-    <snapshots><enabled>true</enabled></snapshots>
-    <releases><enabled>false</enabled></releases>
-  </repository>
-</repositories>
-```
+There is no stable release yet; these links point to the snapshot documentation.
 
 ## Differences with Apache Qpid JMS
 
@@ -57,6 +31,9 @@ Add the [snapshot repository](https://central.sonatype.com/repository/maven-snap
 | Maven coordinates | `org.apache.qpid:qpid-jms-client` | `com.rabbitmq.client:jms-client` |
 | Root package | `org.apache.qpid.jms` | `com.rabbitmq.client.jms` |
 | Module directories | `qpid-jms-*` | `jms-client-*` |
+
+Classes keep their upstream names, e.g. the JNDI initial context factory is
+`com.rabbitmq.client.jms.jndi.JmsInitialContextFactory`.
 
 ## Building the code
 
