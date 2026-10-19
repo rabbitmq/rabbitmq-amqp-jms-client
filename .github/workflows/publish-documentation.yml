@@ -1,0 +1,60 @@
+name: Publish documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - ci/*documentation*.sh
+      - .github/workflows/publish-documentation.yml
+      - pom.xml
+      - jms-client/pom.xml
+      - jms-client-docs/**
+      - .mvn/**
+      - mvnw
+  pull_request:
+    branches: [main]
+    paths:
+      - docs/**
+      - ci/*documentation*.sh
+      - .github/workflows/publish-documentation.yml
+      - pom.xml
+      - jms-client/pom.xml
+      - jms-client-docs/**
+      - .mvn/**
+      - mvnw
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('documentation-pr-{0}', github.event.pull_request.number) || 'documentation-pages' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+      - name: Build documentation for review
+        if: github.event_name == 'pull_request'
+        run: ci/build-documentation.sh
+      - name: Publish documentation
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name "rabbitmq-ci"
+          git config user.email "rabbitmq-ci@users.noreply.github.com"
+          ci/publish-documentation-to-github-pages.sh
+      - name: Request GitHub Pages build
+        if: github.event_name != 'pull_request'
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds"
+        env:
+          GH_TOKEN: ${{ github.token }}

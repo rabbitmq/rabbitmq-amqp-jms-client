@@ -1,0 +1,89 @@
+= RabbitMQ AMQP JMS Client
+include::../target/library-attributes.adoc[]
+:revnumber: {project-version}
+
+RabbitMQ AMQP JMS Client is a Java messaging client that uses AMQP 1.0.
+It is a fork of https://github.com/apache/qpid-jms[Apache Qpid JMS],
+published under RabbitMQ's own Maven coordinates and Java package names,
+and licensed under the https://www.apache.org/licenses/LICENSE-2.0.html[Apache License 2.0].
+
+This is a different library from the
+https://github.com/rabbitmq/rabbitmq-jms-client[RabbitMQ JMS Client], which uses AMQP 0-9-1.
+
+== Requirements
+
+The 2.x client requires Java {java-version} or later and implements Jakarta Messaging 3.1
+using the `jakarta.jms` API namespace.
+Applications using `javax.jms` should use the 1.x client line instead.
+
+For JMS support with RabbitMQ, use Tanzu RabbitMQ with the `rabbitmq_jms` plugin enabled.
+This plugin is not part of open-source RabbitMQ.
+The `rabbitmq_jms_management` plugin adds management UI support.
+Tanzu RabbitMQ 4.4 supports both JMS queues and JMS topics with this client.
+
+// Replace with the published JMS page when its public URL is available.
+See the https://github.gwd.broadcom.net/TNZ/docs-rabbitmq-oci/blob/main/site/jms.md[Tanzu RabbitMQ JMS documentation]
+for plugin setup, queue configuration, and broker-side limitations (Broadcom access required).
+
+== Dependency
+
+Add the client to your application with Maven:
+
+[source,xml,subs="attributes,specialcharacters"]
+----
+<dependency>
+  <groupId>{project-group-id}</groupId>
+  <artifactId>{project-artifact-id}</artifactId>
+  <version>{project-version}</version>
+</dependency>
+----
+
+Or with Gradle:
+
+[source,groovy,subs="attributes,specialcharacters"]
+----
+implementation '{project-group-id}:{project-artifact-id}:{project-version}'
+----
+
+The client implementation uses the `com.rabbitmq.client.jms` package,
+for example `com.rabbitmq.client.jms.JmsConnectionFactory`.
+The messaging API types use `jakarta.jms`.
+
+=== Snapshot repository
+
+Versions ending in `-SNAPSHOT` require the snapshot repository.
+For Maven, add:
+
+[source,xml]
+----
+<repositories>
+  <repository>
+    <id>central-portal-snapshots</id>
+    <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+    <snapshots><enabled>true</enabled></snapshots>
+    <releases><enabled>false</enabled></releases>
+  </repository>
+</repositories>
+----
+
+For Gradle:
+
+[source,groovy]
+----
+repositories {
+  mavenCentral()
+  maven {
+    url = uri('https://central.sonatype.com/repository/maven-snapshots/')
+    mavenContent { snapshotsOnly() }
+    content { includeModule('com.rabbitmq.client', 'jms-client') }
+  }
+}
+----
+
+Release versions use Maven Central and do not require the snapshot repository.
+
+== Further reading
+
+The https://github.com/rabbitmq/rabbitmq-amqp-jms-client/blob/{source-revision}/jms-client-docs/Configuration.md[client configuration reference]
+covers connection URIs and JNDI configuration.
+It is inherited from Apache Qpid JMS; broker-specific capabilities depend on Tanzu RabbitMQ.
