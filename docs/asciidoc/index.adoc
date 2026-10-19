@@ -12,9 +12,9 @@ https://github.com/rabbitmq/rabbitmq-jms-client[RabbitMQ JMS Client], which uses
 
 == Requirements
 
-The 2.x client requires Java {java-version} or later and implements Jakarta Messaging 3.1
-using the `jakarta.jms` API namespace.
-Applications using `javax.jms` should use the 1.x client line instead.
+The 1.x client requires Java {java-version} or later and implements JMS 2.0
+using the `javax.jms` API namespace.
+Applications using Jakarta Messaging and `jakarta.jms` should use the 2.x client line instead.
 
 For JMS support with RabbitMQ, use Tanzu RabbitMQ with the `rabbitmq_jms` plugin enabled.
 This plugin is not part of open-source RabbitMQ.
@@ -47,7 +47,7 @@ implementation '{project-group-id}:{project-artifact-id}:{project-version}'
 
 The client implementation uses the `com.rabbitmq.client.jms` package,
 for example `com.rabbitmq.client.jms.JmsConnectionFactory`.
-The messaging API types use `jakarta.jms`.
+The messaging API types use `javax.jms`.
 
 === Snapshot repository
 
