@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 ci/build-documentation.sh
 
 version=$(cat docs/target/library-version.txt)
+version_line="${version%%.*}.x"
 case "$version" in
   *-SNAPSHOT) channel=snapshot ;;
   *-*) channel=milestone ;;
@@ -34,9 +35,9 @@ else
   git worktree add --orphan -b "$temporary_branch" "$site"
 fi
 
-mkdir -p "$site/$version/htmlsingle" "$site/2.x/$channel/htmlsingle"
+mkdir -p "$site/$version/htmlsingle" "$site/$version_line/$channel/htmlsingle"
 cp docs/target/htmlsingle/index.html "$site/$version/htmlsingle/index.html"
-cp docs/target/htmlsingle/index.html "$site/2.x/$channel/htmlsingle/index.html"
+cp docs/target/htmlsingle/index.html "$site/$version_line/$channel/htmlsingle/index.html"
 touch "$site/.nojekyll"
 
 {
@@ -47,13 +48,18 @@ touch "$site/.nojekyll"
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RabbitMQ AMQP JMS Client Documentation</title>
 <h1>RabbitMQ AMQP JMS Client Documentation</h1>
-<p>2.x: Jakarta Messaging 3.1 (jakarta.jms), Java 11 or later.</p>
+<p>Choose a client version. Each guide describes its Java and messaging API requirements.</p>
 <ul>
 HTML
-  for entry in stable milestone snapshot; do
-    if [[ -f "$site/2.x/$entry/htmlsingle/index.html" ]]; then
-      printf '<li><a href="2.x/%s/htmlsingle/index.html">2.x %s</a></li>\n' "$entry" "$entry"
-    fi
+  for line_dir in "$site"/*.x; do
+    [[ -d "$line_dir" ]] || continue
+    line="${line_dir##*/}"
+    [[ "$line" =~ ^[1-9][0-9]*\.x$ ]] || continue
+    for entry in stable milestone snapshot; do
+      if [[ -f "$line_dir/$entry/htmlsingle/index.html" ]]; then
+        printf '<li><a href="%s/%s/htmlsingle/index.html">%s %s</a></li>\n' "$line" "$entry" "$line" "$entry"
+      fi
+    done
   done
   printf '</ul>\n</html>\n'
 } > "$site/index.html"

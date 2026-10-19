@@ -20,8 +20,8 @@ def value(element, path):
     return result.strip()
 
 version = value(root, "m:properties/m:revision")
-if not re.fullmatch(r"2\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", version):
-    raise SystemExit(f"Expected a 2.x library version, got {version!r}")
+if not re.fullmatch(r"[1-9][0-9]*\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?", version):
+    raise SystemExit(f"Invalid library version: {version!r}")
 
 attributes = {
     "project-version": version,
