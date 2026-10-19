@@ -48,10 +48,6 @@ fi
 
 if git rev-parse --verify -q "refs/heads/$BRANCH" > /dev/null; then
   LAST=$(git log -1 --format='%(trailers:key=Upstream-Commit,valueonly)' "$BRANCH" | tr -d '[:space:]')
-  if [[ "$SHA" == "$LAST" ]]; then
-    echo "$BRANCH already synced with $REF ($SHA)"
-    exit 0
-  fi
   git worktree add -q "$WT" "$BRANCH"
 else
   LAST=""
@@ -64,6 +60,12 @@ cd "$WT"
 git read-tree -u --reset "$SHA"
 "$TMP/rename.sh"
 git add -A
+# Reapply the current transformation even when the upstream ref is unchanged.
+# This lets script fixes reach the renamed branches without an upstream update.
+if git diff --cached --quiet HEAD; then
+  echo "$BRANCH already matches transformed $REF ($SHA)"
+  exit 0
+fi
 git commit -q -m "Sync with upstream $REF (renamed)" -m "Upstream-Commit: $SHA"
 
 echo "$BRANCH: $(git log -1 --format='%h %s')"
