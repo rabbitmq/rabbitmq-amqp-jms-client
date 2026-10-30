@@ -51,6 +51,8 @@ import jakarta.jms.TransactionRolledBackException;
 import com.rabbitmq.client.jms.JmsConnection;
 import com.rabbitmq.client.jms.JmsDefaultConnectionListener;
 import com.rabbitmq.client.jms.JmsOperationTimedOutException;
+import com.rabbitmq.client.jms.JmsSession;
+import com.rabbitmq.client.jms.JmsTransactionListener;
 import com.rabbitmq.client.jms.exceptions.JmsConnectionFailedException;
 import com.rabbitmq.client.jms.message.JmsInboundMessageDispatch;
 import com.rabbitmq.client.jms.policy.JmsDefaultPrefetchPolicy;
@@ -83,6 +85,7 @@ import org.apache.qpid.proton.amqp.Symbol;
 import org.apache.qpid.proton.amqp.UnsignedInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -203,6 +206,9 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
 
+            JmsTransactionListener listener = Mockito.mock(JmsTransactionListener.class);
+            ((JmsSession) session).getTransactionContext().setListener(listener);
+
             // Reply to the 'discharge' with a rejected outcome carrying the rollback error.
             Error rejectError = new Error();
             rejectError.setCondition(TransactionError.TRANSACTION_ROLLBACK);
@@ -218,6 +224,7 @@ public class TransactionsIntegrationTest extends QpidJmsTestCase {
             } catch (TransactionRolledBackException jmsTxRb) {
                 assertTrue(jmsTxRb.getMessage().contains("does not support transactions"));
             }
+            Mockito.verify(listener).onTransactionRolledBack();
 
             testPeer.expectDischarge(txnId2, true);
             testPeer.expectClose();

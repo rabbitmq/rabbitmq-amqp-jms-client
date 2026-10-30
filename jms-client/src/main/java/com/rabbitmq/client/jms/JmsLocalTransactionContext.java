@@ -221,7 +221,7 @@ public class JmsLocalTransactionContext implements JmsTransactionContext {
                     }
                 } catch (JMSException cause) {
                     LOG.info("Commit failed for transaction: {}", oldTransactionId);
-                    if (listener != null) {
+                    if (listener != null && cause instanceof TransactionRolledBackException) {
                         try {
                             listener.onTransactionRolledBack();
                         } catch (Throwable error) {

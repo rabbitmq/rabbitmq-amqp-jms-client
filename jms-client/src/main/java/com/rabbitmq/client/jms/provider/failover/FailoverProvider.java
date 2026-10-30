@@ -62,7 +62,7 @@ import com.rabbitmq.client.jms.provider.exceptions.ProviderFailedException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderIOException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderSendTimedOutException;
-import com.rabbitmq.client.jms.provider.exceptions.ProviderTransactionRolledBackException;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderTransactionInDoubtException;
 import com.rabbitmq.client.jms.util.QpidJMSThreadFactory;
 import com.rabbitmq.client.jms.util.ThreadPoolUtils;
 import org.slf4j.Logger;
@@ -423,7 +423,7 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
 
             @Override
             protected ProviderException createOfflineFailureException(ProviderException error) {
-                return new ProviderTransactionRolledBackException("Commit failed, connection offline: " + error.getMessage(), error);
+                return new ProviderTransactionInDoubtException("Commit outcome unknown, connection offline: " + error.getMessage(), error);
             }
         };
 

@@ -53,6 +53,9 @@ import com.rabbitmq.client.jms.JmsOperationTimedOutException;
 import com.rabbitmq.client.jms.JmsQueue;
 import com.rabbitmq.client.jms.JmsResourceNotFoundException;
 import com.rabbitmq.client.jms.JmsSendTimedOutException;
+import com.rabbitmq.client.jms.JmsSession;
+import com.rabbitmq.client.jms.JmsTransactionInDoubtException;
+import com.rabbitmq.client.jms.JmsTransactionListener;
 import com.rabbitmq.client.jms.policy.JmsDefaultPrefetchPolicy;
 import com.rabbitmq.client.jms.provider.amqp.AmqpSupport;
 import com.rabbitmq.client.jms.test.QpidJmsTestCase;
@@ -2661,13 +2664,16 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             // --- Failover should handle the connection close ---------------//
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+            JmsTransactionListener listener = Mockito.mock(JmsTransactionListener.class);
+            ((JmsSession) session).getTransactionContext().setListener(listener);
 
             try {
                 session.commit();
                 fail("Commit should have thrown an exception");
-            } catch (JMSException jmsEx) {
-                LOG.debug("Commit threw: ", jmsEx);
+            } catch (JmsTransactionInDoubtException jmsEx) {
+                LOG.debug("Commit outcome unknown: ", jmsEx);
             }
+            Mockito.verify(listener, Mockito.never()).onTransactionRolledBack();
 
             assertTrue(failedConnection.await(6, TimeUnit.SECONDS), "Should reported failed");
 
@@ -4243,16 +4249,16 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
     @Test
     @Timeout(20)
     public void testTransactionCommitWithNoResponseRecoveredAsInDoubtAndPerformsNoWork() throws Exception {
-        doTestTransactionRetirementWithNoResponseRecoveredAsInDoubtAndCommitRollsBack(true);
+        doTestTransactionRetirementWithNoResponseRecoversSession(true);
     }
 
     @Test
     @Timeout(20)
     public void testTransactionRollbackWithNoResponseRecoveredAsInDoubtAndPerformsNoWork() throws Exception {
-        doTestTransactionRetirementWithNoResponseRecoveredAsInDoubtAndCommitRollsBack(false);
+        doTestTransactionRetirementWithNoResponseRecoversSession(false);
     }
 
-    private void doTestTransactionRetirementWithNoResponseRecoveredAsInDoubtAndCommitRollsBack(boolean commit) throws Exception {
+    private void doTestTransactionRetirementWithNoResponseRecoversSession(boolean commit) throws Exception {
         try (TestAmqpPeer originalPeer = new TestAmqpPeer();
              TestAmqpPeer finalPeer = new TestAmqpPeer();) {
 
@@ -4353,7 +4359,7 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
                 try {
                     session.commit();
                     fail("Should have failed on the commit when connection dropped");
-                } catch (TransactionRolledBackException txnRbEx) {
+                } catch (JmsTransactionInDoubtException txnInDoubtEx) {
                     // Expected
                 }
             } else {
@@ -4468,7 +4474,7 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             try {
                 session.commit();
                 fail("Should have failed on the commit when connection dropped");
-            } catch (TransactionRolledBackException txnRbEx) {
+            } catch (JmsTransactionInDoubtException txnInDoubtEx) {
                 // Expected
             }
 
