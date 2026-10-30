@@ -882,11 +882,15 @@ public class JmsConnection implements AutoCloseable, Connection, TopicConnection
     JmsXASession createXASessionInternal() throws JMSException {
         checkClosedOrFailed();
         createJmsConnection();
-        JmsXASession result = new JmsXASession(this, getNextSessionId());
+        JmsXASession result = newXASession(getNextSessionId());
         if (started.get()) {
             result.start();
         }
         return result;
+    }
+
+    protected JmsXASession newXASession(JmsSessionId sessionId) throws JMSException {
+        return new JmsXASession(this, sessionId);
     }
 
     /**

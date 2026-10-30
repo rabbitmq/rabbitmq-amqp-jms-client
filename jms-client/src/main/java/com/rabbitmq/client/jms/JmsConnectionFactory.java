@@ -38,6 +38,10 @@ import jakarta.jms.TopicConnectionFactory;
 import jakarta.jms.XAConnection;
 import jakarta.jms.XAConnectionFactory;
 import jakarta.jms.XAJMSContext;
+import jakarta.jms.XAQueueConnection;
+import jakarta.jms.XAQueueConnectionFactory;
+import jakarta.jms.XATopicConnection;
+import jakarta.jms.XATopicConnectionFactory;
 import javax.net.ssl.SSLContext;
 
 import com.rabbitmq.client.jms.exceptions.JmsExceptionSupport;
@@ -69,7 +73,7 @@ import org.slf4j.LoggerFactory;
 /**
  * JMS ConnectionFactory Implementation.
  */
-public class JmsConnectionFactory extends JNDIStorable implements ConnectionFactory, QueueConnectionFactory, TopicConnectionFactory, XAConnectionFactory {
+public class JmsConnectionFactory extends JNDIStorable implements ConnectionFactory, QueueConnectionFactory, TopicConnectionFactory, XAConnectionFactory, XAQueueConnectionFactory, XATopicConnectionFactory {
 
     private static final Logger LOG = LoggerFactory.getLogger(JmsConnectionFactory.class);
 
@@ -242,6 +246,62 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
             Provider provider = createProvider(remoteURI);
 
             connection = new JmsXAConnection(connectionInfo, provider);
+            connection.setExceptionListener(exceptionListener);
+            connection.connect();
+        } catch (Exception e) {
+            if (connection != null) {
+                try {
+                    connection.close();
+                } catch (Throwable ignored) {}
+            }
+            throw JmsExceptionSupport.create(e);
+        }
+
+        return connection;
+    }
+
+    @Override
+    public XAQueueConnection createXAQueueConnection() throws JMSException {
+        return createXAQueueConnection(getUsername(), getPassword());
+    }
+
+    @Override
+    public XAQueueConnection createXAQueueConnection(String username, String password) throws JMSException {
+        JmsXAQueueConnection connection = null;
+
+        try {
+            JmsConnectionInfo connectionInfo = configureConnectionInfo(username, password);
+            Provider provider = createProvider(remoteURI);
+
+            connection = new JmsXAQueueConnection(connectionInfo, provider);
+            connection.setExceptionListener(exceptionListener);
+            connection.connect();
+        } catch (Exception e) {
+            if (connection != null) {
+                try {
+                    connection.close();
+                } catch (Throwable ignored) {}
+            }
+            throw JmsExceptionSupport.create(e);
+        }
+
+        return connection;
+    }
+
+    @Override
+    public XATopicConnection createXATopicConnection() throws JMSException {
+        return createXATopicConnection(getUsername(), getPassword());
+    }
+
+    @Override
+    public XATopicConnection createXATopicConnection(String username, String password) throws JMSException {
+        JmsXATopicConnection connection = null;
+
+        try {
+            JmsConnectionInfo connectionInfo = configureConnectionInfo(username, password);
+            Provider provider = createProvider(remoteURI);
+
+            connection = new JmsXATopicConnection(connectionInfo, provider);
             connection.setExceptionListener(exceptionListener);
             connection.connect();
         } catch (Exception e) {
