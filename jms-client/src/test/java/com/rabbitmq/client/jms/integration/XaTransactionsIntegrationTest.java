@@ -41,6 +41,7 @@ import javax.transaction.xa.Xid;
 import jakarta.jms.MessageConsumer;
 import jakarta.jms.MessageProducer;
 import jakarta.jms.JMSContext;
+import jakarta.jms.JMSException;
 import jakarta.jms.TransactionInProgressException;
 import jakarta.jms.TransactionInProgressRuntimeException;
 import jakarta.jms.XAJMSContext;
@@ -58,6 +59,7 @@ import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Modified;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Released;
+import com.rabbitmq.client.jms.test.testpeer.describedtypes.Rejected;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.TransactionalState;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.matchers.AcceptedMatcher;
@@ -79,6 +81,8 @@ import org.hamcrest.Description;
 import org.hamcrest.TypeSafeMatcher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Tests for the XA transactions of the RabbitMQ AMQP 1.0 extension.
@@ -90,6 +94,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
     private static final Symbol XID = Symbol.valueOf("rabbitmq:xid");
     private static final Symbol XA_PREPARE = Symbol.valueOf("rabbitmq:xa-prepare");
     private static final Symbol XA_COMMIT = Symbol.valueOf("rabbitmq:xa-commit");
+    private static final Symbol XA_ROLLBACK = Symbol.valueOf("rabbitmq:xa-rollback");
     private static final Symbol XA_RECOVER = Symbol.valueOf("rabbitmq:xa-recover");
     private static final Symbol XIDS = Symbol.valueOf("x-opt-rabbitmq-xids");
     private static final Symbol MORE = Symbol.valueOf("x-opt-rabbitmq-more");
@@ -236,12 +241,18 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             assertTrue(restored.await(5, TimeUnit.SECONDS), "Should reconnect to the final peer");
 
             resource.end(lost, XAResource.TMSUCCESS);
+            Xid next = new TestXid(3);
+            expectXaCoordinatorAttach(finalPeer);
+            expectXaDeclare(finalPeer, next, TXN_ID_2);
+            resource.start(next, XAResource.TMNOFLAGS);
             resource.rollback(lost);
             assertXaError(XAException.XAER_NOTA, () -> resource.prepare(lost));
 
-            expectXaCoordinatorAttach(finalPeer);
             expectXaControl(finalPeer, XA_COMMIT, xid(prepared), new Accepted());
             resource.commit(prepared, false);
+            resource.end(next, XAResource.TMSUCCESS);
+            finalPeer.expectDischarge(TXN_ID_2, true);
+            resource.rollback(next);
 
             finalPeer.expectClose();
             connection.close();
@@ -339,14 +350,13 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
         }
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(strings = {"prepare", "commit", "rollback"})
     @Timeout(20)
-    public void testBranchesCanBeCompletedAfterSessionClose() throws Exception {
+    public void testBranchesCanBeCompletedAfterSessionClose(String completion) throws Exception {
         try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
             Xid prepared = new TestXid(1);
-            Xid toPrepare = new TestXid(2);
-            Xid toCommit = new TestXid(3);
-            Xid toRollback = new TestXid(4);
+            Xid ended = new TestXid(2);
 
             JmsXAConnection connection = createXAConnection(testPeer);
 
@@ -361,33 +371,123 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             resource.end(prepared, XAResource.TMSUCCESS);
             assertEquals(XAResource.XA_OK, resource.prepare(prepared));
 
-            for (Xid xid : new Xid[] { toPrepare, toCommit, toRollback }) {
-                expectXaDeclare(testPeer, xid, TXN_ID_2);
-                resource.start(xid, XAResource.TMNOFLAGS);
-                resource.end(xid, XAResource.TMSUCCESS);
-            }
-
-            // The session ends once the last branch that is not prepared has been completed.
+            expectXaDeclare(testPeer, ended, TXN_ID_2);
+            resource.start(ended, XAResource.TMNOFLAGS);
+            resource.end(ended, XAResource.TMSUCCESS);
             session.close();
 
-            expectXaControl(testPeer, XA_PREPARE, TXN_ID_2, new Accepted());
-            assertEquals(XAResource.XA_OK, resource.prepare(toPrepare));
-            testPeer.expectDischarge(TXN_ID_2, false);
-            resource.commit(toCommit, true);
-            testPeer.expectDischarge(TXN_ID_2, true);
-            testPeer.expectEnd();
-            resource.rollback(toRollback);
+            switch (completion) {
+                case "prepare":
+                    expectXaControl(testPeer, XA_PREPARE, TXN_ID_2, new Accepted());
+                    testPeer.expectEnd();
+                    assertEquals(XAResource.XA_OK, resource.prepare(ended));
+                    break;
+                case "commit":
+                    testPeer.expectDischarge(TXN_ID_2, false);
+                    testPeer.expectEnd();
+                    resource.commit(ended, true);
+                    break;
+                case "rollback":
+                    testPeer.expectDischarge(TXN_ID_2, true);
+                    testPeer.expectEnd();
+                    resource.rollback(ended);
+                    break;
+            }
             testPeer.waitForAllHandlersToComplete(1000);
 
             expectXaCoordinatorAttach(testPeer);
             expectXaControl(testPeer, XA_COMMIT, xid(prepared), new Accepted());
             resource.commit(prepared, false);
+            if (completion.equals("prepare")) {
+                expectXaControl(testPeer, XA_COMMIT, xid(ended), new Accepted());
+                resource.commit(ended, false);
+            }
 
             testPeer.expectClose();
             connection.close();
-
             assertXaError(XAException.XAER_RMFAIL, () -> resource.recover(XAResource.TMSTARTRSCAN));
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
 
+    @ParameterizedTest
+    @ValueSource(ints = {XAResource.TMSUCCESS, XAResource.TMSUSPEND, XAResource.TMFAIL})
+    @Timeout(20)
+    public void testNewBranchRequiresPreviousBranchToPrepareOrComplete(int endFlag) throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            JmsXAConnection connection = createXAConnection(testPeer);
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+            Xid first = new TestXid(1);
+            Xid second = new TestXid(2);
+
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, first, TXN_ID_1);
+            resource.start(first, XAResource.TMNOFLAGS);
+            resource.end(first, endFlag);
+            assertXaError(XAException.XAER_DUPID, () -> resource.start(first, XAResource.TMNOFLAGS));
+            assertXaError(XAException.XAER_PROTO, () -> resource.start(second, XAResource.TMNOFLAGS));
+
+            testPeer.expectDischarge(TXN_ID_1, true);
+            resource.rollback(first);
+            expectXaDeclare(testPeer, second, TXN_ID_2);
+            resource.start(second, XAResource.TMNOFLAGS);
+            resource.end(second, XAResource.TMSUCCESS);
+            expectXaControl(testPeer, XA_PREPARE, TXN_ID_2, new Accepted());
+            assertEquals(XAResource.XA_OK, resource.prepare(second));
+
+            expectXaDeclare(testPeer, first, TXN_ID_1);
+            resource.start(first, XAResource.TMNOFLAGS);
+            testPeer.expectClose();
+            connection.close();
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testPersistentSendOutsideBranchReportsRejectionSynchronously() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            JmsXAConnection connection = createXAConnection(testPeer);
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            testPeer.expectSenderAttach();
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+
+            testPeer.expectTransfer(textMessage("before"), nullValue(), new Rejected(), true);
+            assertThrows(JMSException.class, () -> producer.send(session.createTextMessage("before")));
+
+            Xid xid = new TestXid(1);
+            XAResource resource = session.getXAResource();
+            expectXaCoordinatorAttach(testPeer);
+            expectXaDeclare(testPeer, xid, TXN_ID_1);
+            resource.start(xid, XAResource.TMNOFLAGS);
+            resource.end(xid, XAResource.TMSUCCESS);
+
+            testPeer.expectTransfer(textMessage("after"), nullValue(), new Rejected(), true);
+            assertThrows(JMSException.class, () -> producer.send(session.createTextMessage("after")));
+            testPeer.expectDischarge(TXN_ID_1, true);
+            resource.rollback(xid);
+            testPeer.expectClose();
+            connection.close();
+            testPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testPersistentSendOutsideBranchHonorsForceAsyncSend() throws Exception {
+        try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
+            JmsXAConnection connection = createXAConnection(testPeer, "jms.forceAsyncSend=true");
+            testPeer.expectBegin();
+            XASession session = connection.createXASession();
+            testPeer.expectSenderAttach();
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+            testPeer.expectTransfer(textMessage("outside"), nullValue(), false, false, null, false);
+            producer.send(session.createTextMessage("outside"));
+            testPeer.expectClose();
+            connection.close();
             testPeer.waitForAllHandlersToComplete(1000);
         }
     }
@@ -649,7 +749,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
     @Timeout(20)
     public void testCompletingAnotherBranchKeepsTheAssociation() throws Exception {
         try (TestAmqpPeer testPeer = new TestAmqpPeer()) {
-            Xid toPrepare = new TestXid(1);
+            Xid toCommit = new TestXid(1);
             Xid toRollback = new TestXid(2);
             Xid associated = new TestXid(3);
             Binary txnId3 = new Binary(new byte[] { 9 });
@@ -663,18 +763,20 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
 
             expectXaCoordinatorAttach(testPeer);
-            expectXaDeclare(testPeer, toPrepare, TXN_ID_1);
-            expectXaDeclare(testPeer, toRollback, TXN_ID_2);
-            expectXaDeclare(testPeer, associated, txnId3);
-            for (Xid xid : new Xid[] { toPrepare, toRollback }) {
+            for (Xid xid : new Xid[] { toCommit, toRollback }) {
+                Binary txnId = xid == toCommit ? TXN_ID_1 : TXN_ID_2;
+                expectXaDeclare(testPeer, xid, txnId);
                 resource.start(xid, XAResource.TMNOFLAGS);
                 resource.end(xid, XAResource.TMSUCCESS);
+                expectXaControl(testPeer, XA_PREPARE, txnId, new Accepted());
+                assertEquals(XAResource.XA_OK, resource.prepare(xid));
             }
+            expectXaDeclare(testPeer, associated, txnId3);
             resource.start(associated, XAResource.TMNOFLAGS);
 
-            expectXaControl(testPeer, XA_PREPARE, TXN_ID_1, new Accepted());
-            resource.prepare(toPrepare);
-            testPeer.expectDischarge(TXN_ID_2, true);
+            expectXaControl(testPeer, XA_COMMIT, xid(toCommit), new Accepted());
+            resource.commit(toCommit, false);
+            expectXaControl(testPeer, XA_ROLLBACK, xid(toRollback), new Accepted());
             resource.rollback(toRollback);
 
             TransactionalState accepted = new TransactionalState().setTxnId(txnId3).setOutcome(new Accepted());

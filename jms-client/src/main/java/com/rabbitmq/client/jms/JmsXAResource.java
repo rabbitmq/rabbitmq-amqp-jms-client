@@ -85,6 +85,9 @@ public class JmsXAResource implements XAResource {
                 if (branch != null) {
                     throw new XAException(XAException.XAER_DUPID);
                 }
+                if (branches.values().stream().anyMatch(b -> b.state != State.PREPARED && !isLost(b))) {
+                    throw new XAException(XAException.XAER_PROTO);
+                }
                 // Read before the request, so that an interruption during the request loses the branch.
                 long interruptionsAtStart = interruptions.get();
                 connection.xa(request(Type.START, xid).setTransactionId(connection.getNextTransactionId()));

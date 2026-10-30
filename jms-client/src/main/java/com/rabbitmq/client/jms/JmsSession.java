@@ -990,7 +990,7 @@ public class JmsSession implements AutoCloseable, Session, QueueSession, TopicSe
             }
 
             boolean sync = connection.isForceSyncSend() ||
-                           (!connection.isForceAsyncSend() && deliveryMode == DeliveryMode.PERSISTENT && !getTransacted());
+                           (!connection.isForceAsyncSend() && deliveryMode == DeliveryMode.PERSISTENT && !transactionContext.isInTransaction());
 
             outbound.onSend(timeToLive);
 
