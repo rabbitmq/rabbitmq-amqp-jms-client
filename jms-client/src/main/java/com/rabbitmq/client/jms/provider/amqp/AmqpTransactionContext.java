@@ -364,6 +364,12 @@ public class AmqpTransactionContext implements AmqpResourceParent {
                 withXaCoordinator(result, () -> coordinator.xaRecover(xaRequest.getStartAfter(), xaRequest,
                     new XaCompletion(result)));
                 break;
+            case GET_TIMEOUT:
+                withXaCoordinator(result, () -> {
+                    xaRequest.setTimeout(coordinator.getTransactionTimeout());
+                    result.onSuccess();
+                });
+                break;
             default:
                 throw new ProviderIllegalStateException("Unknown XA request " + xaRequest);
         }

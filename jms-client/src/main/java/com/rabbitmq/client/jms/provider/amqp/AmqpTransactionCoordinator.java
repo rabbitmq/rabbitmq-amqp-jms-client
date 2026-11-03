@@ -39,6 +39,7 @@ import com.rabbitmq.client.jms.provider.exceptions.ProviderTransactionRolledBack
 import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.DescribedType;
 import org.apache.qpid.proton.amqp.Symbol;
+import org.apache.qpid.proton.amqp.UnsignedInteger;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
 import org.apache.qpid.proton.amqp.messaging.Modified;
 import org.apache.qpid.proton.amqp.transaction.GlobalTxId;
@@ -74,6 +75,18 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
 
     public AmqpTransactionCoordinator(JmsSessionInfo resourceInfo, Sender endpoint, AmqpResourceParent parent) {
         super(resourceInfo, endpoint, parent);
+    }
+
+    public int getTransactionTimeout() throws ProviderXaException {
+        Map<Symbol, Object> properties = getEndpoint().getRemoteProperties();
+        Object value = properties == null ? null : properties.get(Symbol.valueOf("rabbitmq:transaction-timeout"));
+        if (value instanceof UnsignedInteger) {
+            long seconds = ((UnsignedInteger) value).longValue();
+            if (seconds > 0 && seconds <= Integer.MAX_VALUE) {
+                return (int) seconds;
+            }
+        }
+        throw new ProviderXaException(XAException.XAER_RMERR, "Broker did not provide a valid transaction timeout");
     }
 
     @Override

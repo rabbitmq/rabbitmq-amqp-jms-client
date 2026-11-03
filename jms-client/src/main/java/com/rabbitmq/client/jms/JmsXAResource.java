@@ -374,8 +374,10 @@ public class JmsXAResource implements XAResource {
     }
 
     @Override
-    public int getTransactionTimeout() {
-        return 0;
+    public int getTransactionTimeout() throws XAException {
+        JmsXaRequest request = new JmsXaRequest(Type.GET_TIMEOUT, session.getSessionId(), null, null);
+        connection.xa(request);
+        return request.getTimeout();
     }
 
     @Override

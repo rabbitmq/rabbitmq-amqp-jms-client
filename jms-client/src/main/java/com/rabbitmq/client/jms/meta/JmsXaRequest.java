@@ -38,7 +38,8 @@ public final class JmsXaRequest {
         COMMIT,
         ROLLBACK,
         FORGET,
-        RECOVER
+        RECOVER,
+        GET_TIMEOUT
     }
 
     private final Type type;
@@ -49,6 +50,7 @@ public final class JmsXaRequest {
     private Xid startAfter;
     private final List<Xid> recovered = new ArrayList<>();
     private boolean more;
+    private int timeout;
 
     public JmsXaRequest(Type type, JmsSessionId sessionId, Xid xid, String key) {
         this.type = type;
@@ -134,6 +136,14 @@ public final class JmsXaRequest {
 
     public boolean hasMore() {
         return more;
+    }
+
+    public int getTimeout() {
+        return timeout;
+    }
+
+    public void setTimeout(int timeout) {
+        this.timeout = timeout;
     }
 
     @Override

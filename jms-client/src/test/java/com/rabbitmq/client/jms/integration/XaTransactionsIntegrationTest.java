@@ -21,6 +21,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -55,7 +56,11 @@ import com.rabbitmq.client.jms.message.JmsInboundMessageDispatch;
 import com.rabbitmq.client.jms.test.QpidJmsTestCase;
 import com.rabbitmq.client.jms.test.testpeer.ListDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.TestAmqpPeer;
+import com.rabbitmq.client.jms.test.testpeer.basictypes.ReceiverSettleMode;
+import com.rabbitmq.client.jms.test.testpeer.basictypes.Role;
+import com.rabbitmq.client.jms.test.testpeer.basictypes.SenderSettleMode;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Accepted;
+import com.rabbitmq.client.jms.test.testpeer.describedtypes.AttachFrame;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Modified;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.Released;
@@ -63,6 +68,7 @@ import com.rabbitmq.client.jms.test.testpeer.describedtypes.Rejected;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.TransactionalState;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
 import com.rabbitmq.client.jms.test.testpeer.matchers.AcceptedMatcher;
+import com.rabbitmq.client.jms.test.testpeer.matchers.AttachMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.CoordinatorMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.ModifiedMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.TransactionalStateMatcher;
@@ -74,6 +80,7 @@ import com.rabbitmq.client.jms.test.testpeer.matchers.types.EncodedAmqpValueMatc
 import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.DescribedType;
 import org.apache.qpid.proton.amqp.Symbol;
+import org.apache.qpid.proton.amqp.UnsignedInteger;
 import org.apache.qpid.proton.amqp.UnsignedLong;
 import org.apache.qpid.proton.amqp.transaction.TxnCapability;
 import org.apache.qpid.proton.codec.Data;
@@ -103,6 +110,98 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
     private static final Binary TXN_ID_2 = new Binary(new byte[] { 5, 6, 7, 8 });
 
     private final IntegrationTestFixture testFixture = new IntegrationTestFixture();
+
+    @ParameterizedTest
+    @ValueSource(ints = {60, 1800})
+    @Timeout(20)
+    public void testTransactionTimeoutBeforeStart(int seconds) throws Exception {
+        try (TestAmqpPeer peer = new TestAmqpPeer()) {
+            JmsXAConnection connection = createXAConnection(peer);
+            peer.expectBegin();
+            XAResource resource = connection.createXASession().getXAResource();
+            expectXaCoordinatorAttach(peer, UnsignedInteger.valueOf(seconds));
+
+            assertEquals(seconds, resource.getTransactionTimeout());
+            assertFalse(resource.setTransactionTimeout(10));
+            assertEquals(seconds, resource.getTransactionTimeout());
+
+            Xid xid = new TestXid(1);
+            expectXaDeclare(peer, xid, TXN_ID_1);
+            resource.start(xid, XAResource.TMNOFLAGS);
+            assertEquals(seconds, resource.getTransactionTimeout());
+            resource.end(xid, XAResource.TMSUCCESS);
+            peer.expectDischarge(TXN_ID_1, true);
+            resource.rollback(xid);
+
+            peer.expectClose();
+            connection.close();
+            assertXaError(XAException.XAER_RMFAIL, resource::getTransactionTimeout);
+            peer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testTransactionTimeoutAfterFailover() throws Exception {
+        try (TestAmqpPeer originalPeer = new TestAmqpPeer();
+             TestAmqpPeer finalPeer = new TestAmqpPeer()) {
+            originalPeer.expectSaslAnonymous();
+            originalPeer.expectOpen();
+            originalPeer.expectBegin();
+            originalPeer.expectBegin();
+            expectXaCoordinatorAttach(originalPeer, UnsignedInteger.valueOf(1800));
+            originalPeer.expectSenderAttach();
+            originalPeer.dropAfterLastHandler();
+
+            finalPeer.expectSaslAnonymous();
+            finalPeer.expectOpen();
+            finalPeer.expectBegin();
+            finalPeer.expectBegin();
+            finalPeer.expectSenderAttach();
+            expectXaCoordinatorAttach(finalPeer, UnsignedInteger.valueOf(60));
+
+            JmsXAConnection connection = createFailoverXAConnection(null, originalPeer, finalPeer);
+            XASession session = connection.createXASession();
+            XAResource resource = session.getXAResource();
+            assertEquals(1800, resource.getTransactionTimeout());
+
+            CountDownLatch restored = awaitRestored(connection);
+            session.createProducer(session.createQueue("myQueue"));
+            assertTrue(restored.await(5, TimeUnit.SECONDS));
+            assertEquals(60, resource.getTransactionTimeout());
+
+            finalPeer.expectClose();
+            connection.close();
+            originalPeer.waitForAllHandlersToComplete(2000);
+            finalPeer.waitForAllHandlersToComplete(1000);
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    public void testMissingOrInvalidTransactionTimeout() throws Exception {
+        Object[] values = {null, "60", UnsignedInteger.ZERO, UnsignedInteger.valueOf(2147483648L)};
+        for (Object value : values) {
+            try (TestAmqpPeer peer = new TestAmqpPeer()) {
+                JmsXAConnection connection = createXAConnection(peer);
+                peer.expectBegin();
+                XAResource resource = connection.createXASession().getXAResource();
+                expectXaCoordinatorAttach(peer, value);
+                assertXaError(XAException.XAER_RMERR, resource::getTransactionTimeout);
+
+                Xid xid = new TestXid(1);
+                expectXaDeclare(peer, xid, TXN_ID_1);
+                resource.start(xid, XAResource.TMNOFLAGS);
+                resource.end(xid, XAResource.TMSUCCESS);
+                peer.expectDischarge(TXN_ID_1, true);
+                resource.rollback(xid);
+
+                peer.expectClose();
+                connection.close();
+                peer.waitForAllHandlersToComplete(1000);
+            }
+        }
+    }
 
     @Test
     @Timeout(20)
@@ -658,6 +757,7 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
             assertXaError(XAException.XAER_RMFAIL, () -> resource.rollback(xid));
             assertXaError(XAException.XAER_RMFAIL, () -> resource.forget(xid));
             assertXaError(XAException.XAER_RMFAIL, () -> resource.recover(XAResource.TMSTARTRSCAN));
+            assertXaError(XAException.XAER_RMFAIL, resource::getTransactionTimeout);
 
             connection.close();
         }
@@ -842,6 +942,21 @@ public class XaTransactionsIntegrationTest extends QpidJmsTestCase {
         CoordinatorMatcher coordinator = new CoordinatorMatcher()
             .withCapabilities(arrayContaining(TxnCapability.LOCAL_TXN, XA_CAPABILITY));
         peer.expectSenderAttach(coordinator, false, false);
+    }
+
+    private static void expectXaCoordinatorAttach(TestAmqpPeer peer, Object timeout) {
+        CoordinatorMatcher coordinator = new CoordinatorMatcher()
+            .withCapabilities(arrayContaining(TxnCapability.LOCAL_TXN, XA_CAPABILITY));
+        AttachMatcher attach = new AttachMatcher()
+            .withRole(equalTo(Role.SENDER)).withTarget(coordinator);
+        AttachFrame reply = new AttachFrame().setRole(Role.RECEIVER)
+            .setSndSettleMode(SenderSettleMode.UNSETTLED).setRcvSettleMode(ReceiverSettleMode.FIRST);
+        if (timeout != null) {
+            Map<Symbol, Object> properties = new HashMap<>();
+            properties.put(Symbol.valueOf("rabbitmq:transaction-timeout"), timeout);
+            reply.setProperties(properties);
+        }
+        peer.expectSenderAttach(attach, reply, false, false, false, 0, 100, null, null);
     }
 
     private static void expectXaDeclare(TestAmqpPeer peer, Xid xid, Binary txnId) {
