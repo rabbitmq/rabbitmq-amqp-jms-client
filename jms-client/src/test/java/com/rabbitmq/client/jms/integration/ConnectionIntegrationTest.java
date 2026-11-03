@@ -77,7 +77,6 @@ import com.rabbitmq.client.jms.test.testpeer.basictypes.ConnectionError;
 import com.rabbitmq.client.jms.test.testpeer.matchers.CoordinatorMatcher;
 import com.rabbitmq.client.jms.test.testpeer.matchers.sections.TransferPayloadCompositeMatcher;
 import com.rabbitmq.client.jms.util.MetaDataSupport;
-import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.Symbol;
 import org.apache.qpid.proton.amqp.UnsignedInteger;
 import org.apache.qpid.proton.amqp.transaction.TxnCapability;
@@ -223,12 +222,6 @@ public class ConnectionIntegrationTest extends QpidJmsTestCase {
             CoordinatorMatcher txCoordinatorMatcher = new CoordinatorMatcher();
             txCoordinatorMatcher.withCapabilities(arrayContaining(TxnCapability.LOCAL_TXN));
             testPeer.expectSenderAttach(txCoordinatorMatcher, false, false);
-
-            // First expect an unsettled 'declare' transfer to the txn coordinator, and
-            // reply with a declared disposition state containing the txnId.
-            Binary txnId = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-            testPeer.expectDeclare(txnId);
-            testPeer.expectDischarge(txnId, true);
             testPeer.expectClose();
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
@@ -250,12 +243,6 @@ public class ConnectionIntegrationTest extends QpidJmsTestCase {
             CoordinatorMatcher txCoordinatorMatcher = new CoordinatorMatcher();
             txCoordinatorMatcher.withCapabilities(arrayContaining(TxnCapability.LOCAL_TXN));
             testPeer.expectSenderAttach(txCoordinatorMatcher, false, false);
-
-            // First expect an unsettled 'declare' transfer to the txn coordinator, and
-            // reply with a declared disposition state containing the txnId.
-            Binary txnId = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-            testPeer.expectDeclare(txnId);
-            testPeer.expectDischarge(txnId, true);
             testPeer.expectClose();
 
             Session session = connection.createSession(Session.SESSION_TRANSACTED);

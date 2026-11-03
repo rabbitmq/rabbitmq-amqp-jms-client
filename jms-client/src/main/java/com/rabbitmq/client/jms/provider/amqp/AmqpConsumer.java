@@ -33,6 +33,7 @@ import com.rabbitmq.client.jms.message.JmsMessage;
 import com.rabbitmq.client.jms.meta.JmsConsumerId;
 import com.rabbitmq.client.jms.meta.JmsConsumerInfo;
 import com.rabbitmq.client.jms.provider.AsyncResult;
+import com.rabbitmq.client.jms.provider.NoOpAsyncResult;
 import com.rabbitmq.client.jms.provider.ProviderConstants.ACK_TYPE;
 import com.rabbitmq.client.jms.provider.ProviderException;
 import com.rabbitmq.client.jms.provider.ProviderListener;
@@ -40,7 +41,6 @@ import com.rabbitmq.client.jms.provider.WrappedAsyncResult;
 import com.rabbitmq.client.jms.provider.amqp.message.AmqpCodec;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderExceptionSupport;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutException;
-import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
 import org.apache.qpid.proton.amqp.messaging.Released;
 import org.apache.qpid.proton.amqp.transport.DeliveryState;
@@ -356,25 +356,38 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
         boolean transacted = false;
         if (!delivery.remotelySettled()) {
             if (session.isTransacted() && !getResourceInfo().isBrowser()) {
-                if (session.isTransactionInDoubt()) {
+                final AmqpTransactionContext context = session.getTransactionContext();
+                if (session.isTransactionInDoubt() && !context.isDeclareFailed()) {
                     if (session.getResourceInfo().isXa()) {
                         lostBranchDeliveries.add(delivery);
-                        session.getTransactionContext().registerTxConsumer(this);
+                        context.registerTxConsumer(this);
                     }
                     LOG.trace("Skipping ack of message {} in failed transaction.", envelope);
                     return;
                 }
 
-                Binary txnId = session.getTransactionContext().getAmqpTransactionId();
-                if (txnId != null) {
-                    delivery.disposition(session.getTransactionContext().getTxnAcceptState());
-                    transactedDeliveries.add(delivery);
+                if (context.isDeclareFailed()) {
+                    // The remote peer has not seen the acknowledgement, so a rollback delivers the message again.
                     transacted = true;
-                    session.getTransactionContext().registerTxConsumer(this);
+                } else if (context.getAmqpTransactionId() != null) {
+                    delivery.disposition(context.getTxnAcceptState());
+                    transacted = true;
+                } else if (context.isDeclareNeeded()) {
+                    context.afterDeclare(NoOpAsyncResult.INSTANCE, () -> {
+                        if (!context.isDeclareFailed()) {
+                            delivery.disposition(context.getTxnAcceptState());
+                        }
+                    });
+                    transacted = true;
                 } else if (session.getResourceInfo().isXa()) {
                     // An XA session is not in a transaction outside of a branch.
                     delivery.disposition(Accepted.getInstance());
                     delivery.settle();
+                }
+
+                if (transacted) {
+                    transactedDeliveries.add(delivery);
+                    context.registerTxConsumer(this);
                 }
             } else {
                 delivery.disposition(Accepted.getInstance());

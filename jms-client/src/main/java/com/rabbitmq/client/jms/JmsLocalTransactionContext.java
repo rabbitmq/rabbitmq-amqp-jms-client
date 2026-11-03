@@ -189,6 +189,7 @@ public class JmsLocalTransactionContext implements JmsTransactionContext {
 
                 final JmsTransactionId oldTransactionId = transactionInfo.getId();
                 final JmsTransactionInfo nextTx = getNextTransactionInfo();
+                boolean committed = false;
 
                 try {
                     connection.commit(transactionInfo, nextTx, new ProviderSynchronization() {
@@ -205,6 +206,7 @@ public class JmsLocalTransactionContext implements JmsTransactionContext {
                             JmsLocalTransactionContext.this.transactionInfo = nextTx;
                         }
                     });
+                    committed = true;
 
                     if (listener != null) {
                         try {
@@ -232,10 +234,10 @@ public class JmsLocalTransactionContext implements JmsTransactionContext {
                     throw cause;
                 } finally {
                     try {
-                        // If the provider failed to start a new transaction there will not be
-                        // a current provider transaction id present, so we attempt to create
-                        // one to recover our state.
-                        if (nextTx.getId().getProviderTxId() == null) {
+                        // A failed commit may not have reached the provider, which then has not
+                        // started the next transaction, so we attempt to create one to recover
+                        // our state.
+                        if (!committed) {
                             begin();
                         }
                     } catch (Exception e) {
@@ -265,6 +267,7 @@ public class JmsLocalTransactionContext implements JmsTransactionContext {
 
             LOG.debug("Rollback: {}", transactionInfo.getId());
             final JmsTransactionId oldTransactionId = transactionInfo.getId();
+            final boolean inDoubt = transactionInfo.isInDoubt();
             final JmsTransactionInfo nextTx;
 
             if (startNewTx) {
@@ -273,6 +276,7 @@ public class JmsLocalTransactionContext implements JmsTransactionContext {
                 nextTx = null;
             }
 
+            boolean rolledBack = false;
             try {
                 connection.rollback(transactionInfo, nextTx, new ProviderSynchronization() {
 
@@ -288,6 +292,7 @@ public class JmsLocalTransactionContext implements JmsTransactionContext {
                         JmsLocalTransactionContext.this.transactionInfo = nextTx;
                     }
                 });
+                rolledBack = true;
 
                 if (listener != null) {
                     try {
@@ -317,10 +322,10 @@ public class JmsLocalTransactionContext implements JmsTransactionContext {
                 throw cause;
             } finally {
                 try {
-                    // If the provider failed to start a new transaction there will not be
-                    // a current provider transaction id present, so we attempt to create
-                    // one to recover our state.
-                    if (startNewTx && nextTx.getId().getProviderTxId() == null) {
+                    // A provider that a failed rollback did not reach, or that does not know
+                    // an in-doubt transaction, has not started the next transaction, so we
+                    // attempt to create one to recover our state.
+                    if (startNewTx && (!rolledBack || inDoubt)) {
                         begin();
                     }
                 } catch (Exception e) {

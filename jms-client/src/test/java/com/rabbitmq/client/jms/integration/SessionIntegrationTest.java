@@ -2243,11 +2243,6 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             testPeer.expectBegin();
             testPeer.expectCoordinatorAttach();
 
-            // First expect an unsettled 'declare' transfer to the txn coordinator, and
-            // reply with a declared disposition state containing the txnId.
-            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
-            testPeer.expectDeclare(txnId);
-
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
 
             // Create a consumer, don't expect any flow as the connection is stopped
@@ -2261,6 +2256,10 @@ public class SessionIntegrationTest extends QpidJmsTestCase {
             MessageConsumer consumer = session.createConsumer(queue);
 
             testPeer.waitForAllHandlersToComplete(3000);
+
+            // The first acknowledgement declares the transaction.
+            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
+            testPeer.expectDeclare(txnId);
 
             for (int i = 1; i <= messageCount; i++) {
                 // Then expect an *unsettled* TransactionalState disposition for each message once received by the consumer

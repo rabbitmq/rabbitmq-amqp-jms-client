@@ -2868,13 +2868,9 @@ public class ProducerIntegrationTest extends QpidJmsTestCase {
             final Connection connection = testFixture.establishConnecton(testPeer);
             testPeer.expectBegin();
             testPeer.expectCoordinatorAttach();
-
-            // First expect an unsettled 'declare' transfer to the txn coordinator, and
-            // reply with a declared disposition state containing the txnId.
-            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
-            testPeer.expectDeclare(txnId);
-
             testPeer.expectSenderAttach();
+
+            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
 
             final Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
             Queue queue = session.createQueue("myQueue");
@@ -2898,6 +2894,7 @@ public class ProducerIntegrationTest extends QpidJmsTestCase {
             txState.setTxnId(txnId);
             txState.setOutcome(new Accepted());
 
+            testPeer.expectDeclare(txnId);
             testPeer.expectTransfer(messageMatcher, stateMatcher, txState, true);
             testPeer.expectDischarge(txnId, true);
             testPeer.expectClose();
@@ -2940,13 +2937,9 @@ public class ProducerIntegrationTest extends QpidJmsTestCase {
             final Connection connection = testFixture.establishConnecton(testPeer);
             testPeer.expectBegin();
             testPeer.expectCoordinatorAttach();
-
-            // First expect an unsettled 'declare' transfer to the txn coordinator, and
-            // reply with a declared disposition state containing the txnId.
-            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
-            testPeer.expectDeclare(txnId);
-
             testPeer.expectSenderAttach();
+
+            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
 
             final Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
             Queue queue = session.createQueue("myQueue");
@@ -2970,6 +2963,7 @@ public class ProducerIntegrationTest extends QpidJmsTestCase {
             txState.setTxnId(txnId);
             txState.setOutcome(new Accepted());
 
+            testPeer.expectDeclare(txnId);
             testPeer.expectTransfer(messageMatcher, stateMatcher, txState, true);
             testPeer.expectDischarge(txnId, true);
             testPeer.expectClose();

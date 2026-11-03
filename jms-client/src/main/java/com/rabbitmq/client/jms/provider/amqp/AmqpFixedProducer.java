@@ -100,6 +100,8 @@ public class AmqpFixedProducer extends AmqpProducer {
                 // If the transaction has failed due to remote termination etc then we just indicate
                 // the send has succeeded until the a new transaction is started.
                 send.onSuccess();
+            } else if (session.isTransacted() && session.getTransactionContext().isDeclareNeeded()) {
+                session.getTransactionContext().afterDeclare(request, () -> send(envelope, request));
             } else if (getEndpoint().getCredit() <= 0) {
                 LOG.trace("Holding Message send until credit is available.");
 

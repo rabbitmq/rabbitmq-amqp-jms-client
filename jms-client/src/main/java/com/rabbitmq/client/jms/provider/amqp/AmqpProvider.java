@@ -717,7 +717,11 @@ public class AmqpProvider implements Provider, TransportListener , AmqpResourceP
 
                 consumer.acknowledge(envelope, ackType);
 
-                if (consumer.getSession().isAsyncAck()) {
+                AmqpTransactionContext txContext = consumer.getSession().getTransactionContext();
+                if (txContext != null && txContext.isDeclarePending()) {
+                    // The first acknowledgement of a transaction waits for its declare, as a send does.
+                    txContext.afterDeclare(request, request::onSuccess);
+                } else if (consumer.getSession().isAsyncAck()) {
                     request.onSuccess();
                     pumpToProtonTransport(request);
                 } else {

@@ -31,7 +31,6 @@ import com.rabbitmq.client.jms.meta.JmsSessionInfo;
 import com.rabbitmq.client.jms.meta.JmsTransactionId;
 import com.rabbitmq.client.jms.provider.AsyncResult;
 import com.rabbitmq.client.jms.provider.ProviderException;
-import com.rabbitmq.client.jms.provider.amqp.AmqpTransactionContext.DischargeCompletion;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderExceptionSupport;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderIllegalStateException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutException;
@@ -159,12 +158,12 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
         sendTxCommand(message);
     }
 
-    public void discharge(JmsTransactionId txId, DischargeCompletion request) throws ProviderException {
+    public void discharge(JmsTransactionId txId, boolean commit, AsyncResult request) throws ProviderException {
 
         if (isClosed()) {
             ProviderException failureCause = null;
 
-            if (request.isCommit()) {
+            if (commit) {
                 failureCause = new ProviderTransactionRolledBackException("Transaction inbout: Coordinator remotely closed");
             } else {
                 failureCause = new ProviderIllegalStateException("Rollback cannot complete: Coordinator remotely closed");
@@ -179,11 +178,11 @@ public class AmqpTransactionCoordinator extends AmqpAbstractResource<JmsSessionI
         }
 
         // Store the context of this action in the transaction ID for later completion.
-        txId.setProviderContext(request.isCommit() ? COMMIT_MARKER : ROLLBACK_MARKER);
+        txId.setProviderContext(commit ? COMMIT_MARKER : ROLLBACK_MARKER);
 
         Message message = Message.Factory.create();
         Discharge discharge = new Discharge();
-        discharge.setFail(!request.isCommit());
+        discharge.setFail(!commit);
         discharge.setTxnId((Binary) txId.getProviderHint());
         message.setBody(new AmqpValue(discharge));
 

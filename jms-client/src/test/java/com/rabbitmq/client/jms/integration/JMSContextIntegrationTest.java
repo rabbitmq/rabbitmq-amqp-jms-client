@@ -29,7 +29,6 @@ import jakarta.jms.JMSProducer;
 
 import com.rabbitmq.client.jms.test.QpidJmsTestCase;
 import com.rabbitmq.client.jms.test.testpeer.TestAmqpPeer;
-import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.Symbol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -96,19 +95,15 @@ public class JMSContextIntegrationTest extends QpidJmsTestCase {
     @Test
     @Timeout(20)
     public void testCreateContextWithTransactedSessionMode() throws Exception {
-        Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
-
         try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
             JMSContext context = testFixture.createJMSContext(testPeer, JMSContext.SESSION_TRANSACTED);
             assertEquals(JMSContext.SESSION_TRANSACTED, context.getSessionMode());
 
             // Session should be created and a coordinator should be attached since this
-            // should be a TX session, then a new TX is declared, once closed the TX should
-            // be discharged as a roll back.
+            // should be a TX session. The TX has no work, so it is neither declared nor
+            // discharged.
             testPeer.expectBegin();
             testPeer.expectCoordinatorAttach();
-            testPeer.expectDeclare(txnId);
-            testPeer.expectDischarge(txnId, true);
             testPeer.expectEnd();
             testPeer.expectClose();
 
