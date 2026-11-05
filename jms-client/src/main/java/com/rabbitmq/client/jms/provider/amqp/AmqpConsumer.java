@@ -21,6 +21,7 @@ import static com.rabbitmq.client.jms.provider.amqp.AmqpSupport.MODIFIED_FAILED_
 import static com.rabbitmq.client.jms.provider.amqp.AmqpSupport.REJECTED;
 
 import java.util.ArrayList;
+import java.util.List;
 import java.util.ListIterator;
 import java.util.concurrent.ScheduledFuture;
 
@@ -32,6 +33,7 @@ import com.rabbitmq.client.jms.message.JmsMessage;
 import com.rabbitmq.client.jms.meta.JmsConsumerId;
 import com.rabbitmq.client.jms.meta.JmsConsumerInfo;
 import com.rabbitmq.client.jms.provider.AsyncResult;
+import com.rabbitmq.client.jms.provider.NoOpAsyncResult;
 import com.rabbitmq.client.jms.provider.ProviderConstants.ACK_TYPE;
 import com.rabbitmq.client.jms.provider.ProviderException;
 import com.rabbitmq.client.jms.provider.ProviderListener;
@@ -39,7 +41,6 @@ import com.rabbitmq.client.jms.provider.WrappedAsyncResult;
 import com.rabbitmq.client.jms.provider.amqp.message.AmqpCodec;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderExceptionSupport;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutException;
-import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
 import org.apache.qpid.proton.amqp.messaging.Released;
 import org.apache.qpid.proton.amqp.transport.DeliveryState;
@@ -65,6 +66,12 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     protected int deliveredCount;
     protected int dispatchedCount;
     protected boolean deferredClose;
+    // Deliveries acknowledged in the current transaction. They stay unsettled
+    // until the transaction commits, because they remain acquired by us if it
+    // rolls back.
+    private final List<Delivery> transactedDeliveries = new ArrayList<>();
+    // Deliveries acknowledged in an XA branch that a reconnect has lost.
+    private final List<Delivery> lostBranchDeliveries = new ArrayList<>();
 
     public AmqpConsumer(AmqpSession session, JmsConsumerInfo info, Receiver receiver) {
         super(info, receiver, session);
@@ -91,7 +98,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
         if (acknowledgementMode == Session.CLIENT_ACKNOWLEDGE
                 || acknowledgementMode == Session.AUTO_ACKNOWLEDGE
                     || acknowledgementMode == Session.DUPS_OK_ACKNOWLEDGE
-                        || acknowledgementMode == INDIVIDUAL_ACKNOWLEDGE) {
+                        || acknowledgementMode == INDIVIDUAL_ACKNOWLEDGE
+                            || acknowledgementMode == Session.SESSION_TRANSACTED) {
             // Send dispositions for any messages which were previously delivered and
             // session recovered, but were then not delivered again afterwards.
             Delivery delivery = getEndpoint().head();
@@ -345,18 +353,41 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
 
     private void handleAccepted(JmsInboundMessageDispatch envelope, Delivery delivery) {
         LOG.debug("Accepted Ack of message: {}", envelope);
+        boolean transacted = false;
         if (!delivery.remotelySettled()) {
             if (session.isTransacted() && !getResourceInfo().isBrowser()) {
-                if (session.isTransactionInDoubt()) {
+                final AmqpTransactionContext context = session.getTransactionContext();
+                if (session.isTransactionInDoubt() && !context.isDeclareFailed()) {
+                    if (session.getResourceInfo().isXa()) {
+                        lostBranchDeliveries.add(delivery);
+                        context.registerTxConsumer(this);
+                    }
                     LOG.trace("Skipping ack of message {} in failed transaction.", envelope);
                     return;
                 }
 
-                Binary txnId = session.getTransactionContext().getAmqpTransactionId();
-                if (txnId != null) {
-                    delivery.disposition(session.getTransactionContext().getTxnAcceptState());
+                if (context.isDeclareFailed()) {
+                    // The remote peer has not seen the acknowledgement, so a rollback delivers the message again.
+                    transacted = true;
+                } else if (context.getAmqpTransactionId() != null) {
+                    delivery.disposition(context.getTxnAcceptState());
+                    transacted = true;
+                } else if (context.isDeclareNeeded()) {
+                    context.afterDeclare(NoOpAsyncResult.INSTANCE, () -> {
+                        if (!context.isDeclareFailed()) {
+                            delivery.disposition(context.getTxnAcceptState());
+                        }
+                    });
+                    transacted = true;
+                } else if (session.getResourceInfo().isXa()) {
+                    // An XA session is not in a transaction outside of a branch.
+                    delivery.disposition(Accepted.getInstance());
                     delivery.settle();
-                    session.getTransactionContext().registerTxConsumer(this);
+                }
+
+                if (transacted) {
+                    transactedDeliveries.add(delivery);
+                    context.registerTxConsumer(this);
                 }
             } else {
                 delivery.disposition(Accepted.getInstance());
@@ -370,6 +401,12 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
             deliveredCount--;
         }
         dispatchedCount--;
+
+        if (transacted) {
+            // The delivery stays unsettled, so this keeps it from
+            // being released as a prefetched message.
+            envelope.setDelivered(true);
+        }
     }
 
     private void handleDisposition(JmsInboundMessageDispatch envelope, Delivery delivery, DeliveryState outcome) {
@@ -670,12 +707,91 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
     }
 
     public void postCommit() {
+        // The outcome of the acknowledgements has been applied.
+        for (Delivery delivery : transactedDeliveries) {
+            delivery.settle();
+        }
+        transactedDeliveries.clear();
         tryCompleteDeferredClose();
     }
 
     public void postRollback() {
         releasePrefetch();
+        redeliverTransactedDeliveries();
         tryCompleteDeferredClose();
+    }
+
+    /**
+     * A branch that a reconnect has lost rolls back, so the messages acknowledged in it
+     * go back to the remote peer once it ends.
+     */
+    public void postLostBranch() {
+        for (Delivery delivery : lostBranchDeliveries) {
+            handleDisposition((JmsInboundMessageDispatch) delivery.getContext(), delivery, MODIFIED_FAILED);
+        }
+        lostBranchDeliveries.clear();
+        tryCompleteDeferredClose();
+    }
+
+    /**
+     * After a commit that the remote peer rolled back, the messages acknowledged in the
+     * transaction are still acquired by us, so we deliver them again. If the outcome is
+     * not known, we give them back.
+     */
+    public void postFailedCommit(boolean rolledBack) {
+        if (rolledBack) {
+            redeliverTransactedDeliveries();
+            tryCompleteDeferredClose();
+        } else {
+            giveBackTransactedDeliveries();
+        }
+    }
+
+    /**
+     * Gives the messages acknowledged in the transaction back to the remote peer, which
+     * ignores this for deliveries that it has settled.
+     */
+    public void giveBackTransactedDeliveries() {
+        for (Delivery delivery : transactedDeliveries) {
+            delivery.disposition(MODIFIED_FAILED);
+            delivery.settle();
+        }
+        transactedDeliveries.clear();
+        tryCompleteDeferredClose();
+    }
+
+    /**
+     * After a rollback, the messages acknowledged in the transaction are still
+     * acquired by us, so we deliver them again, as a session recover does.
+     * A consumer that is closing gives them back to the remote peer instead.
+     */
+    private void redeliverTransactedDeliveries() {
+        if (deferredClose) {
+            for (Delivery delivery : transactedDeliveries) {
+                delivery.disposition(MODIFIED_FAILED);
+                delivery.settle();
+            }
+        } else {
+            ListIterator<Delivery> reverseIterator =
+                transactedDeliveries.listIterator(transactedDeliveries.size());
+            while (reverseIterator.hasPrevious()) {
+                Delivery delivery = reverseIterator.previous();
+                if (delivery.getContext() instanceof JmsInboundMessageDispatch) {
+                    JmsInboundMessageDispatch envelope = (JmsInboundMessageDispatch) delivery.getContext();
+                    envelope.getMessage().getFacade().setRedeliveryCount(
+                        envelope.getMessage().getFacade().getRedeliveryCount() + 1);
+                    envelope.setEnqueueFirst(true);
+                    envelope.setDelivered(false);
+                    envelope.setRecovered(true);
+                    try {
+                        deliver(envelope);
+                    } catch (Exception e) {
+                        LOG.warn("{} Failed to deliver message again after rollback: {}", this, e.getMessage());
+                    }
+                }
+            }
+        }
+        transactedDeliveries.clear();
     }
 
     @Override
@@ -735,7 +851,8 @@ public class AmqpConsumer extends AmqpAbstractResource<JmsConsumerInfo, Receiver
             if (current.getContext() instanceof JmsInboundMessageDispatch) {
                 JmsInboundMessageDispatch envelope = (JmsInboundMessageDispatch) current.getContext();
                 if (!envelope.isDelivered()) {
-                    handleDisposition(envelope, current, Released.getInstance());
+                    // A recovered message was delivered before, so it counts as a failed delivery.
+                    handleDisposition(envelope, current, envelope.isRecovered() ? MODIFIED_FAILED : Released.getInstance());
                 }
             } else {
                 LOG.debug("{} Found incomplete delivery with no context during release processing", AmqpConsumer.this);

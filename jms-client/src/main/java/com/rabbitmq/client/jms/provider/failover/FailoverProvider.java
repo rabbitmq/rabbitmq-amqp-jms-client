@@ -41,6 +41,7 @@ import com.rabbitmq.client.jms.meta.JmsConsumerId;
 import com.rabbitmq.client.jms.meta.JmsResource;
 import com.rabbitmq.client.jms.meta.JmsSessionId;
 import com.rabbitmq.client.jms.meta.JmsTransactionInfo;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
 import com.rabbitmq.client.jms.provider.AsyncResult;
 import com.rabbitmq.client.jms.provider.DefaultProviderListener;
 import com.rabbitmq.client.jms.provider.Provider;
@@ -61,7 +62,7 @@ import com.rabbitmq.client.jms.provider.exceptions.ProviderFailedException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderIOException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderOperationTimedOutException;
 import com.rabbitmq.client.jms.provider.exceptions.ProviderSendTimedOutException;
-import com.rabbitmq.client.jms.provider.exceptions.ProviderTransactionRolledBackException;
+import com.rabbitmq.client.jms.provider.exceptions.ProviderTransactionInDoubtException;
 import com.rabbitmq.client.jms.util.QpidJMSThreadFactory;
 import com.rabbitmq.client.jms.util.ThreadPoolUtils;
 import org.slf4j.Logger;
@@ -422,7 +423,7 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
 
             @Override
             protected ProviderException createOfflineFailureException(ProviderException error) {
-                return new ProviderTransactionRolledBackException("Commit failed, connection offline: " + error.getMessage(), error);
+                return new ProviderTransactionInDoubtException("Commit outcome unknown, connection offline: " + error.getMessage(), error);
             }
         };
 
@@ -446,6 +447,30 @@ public class FailoverProvider extends DefaultProviderListener implements Provide
             @Override
             public String toString() {
                 return "TX rollback -> " + transactionInfo.getId();
+            }
+        };
+
+        pending.run();
+    }
+
+    @Override
+    public void xa(final JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        checkClosed();
+        final FailoverRequest pending = new FailoverRequest(request, requestTimeout) {
+            @Override
+            public void doTask(Provider provider) throws ProviderException {
+                provider.xa(xaRequest, this);
+            }
+
+            @Override
+            public boolean failureWhenOffline() {
+                // A transaction manager retries a failed XA operation, so it does not wait for a reconnect.
+                return true;
+            }
+
+            @Override
+            public String toString() {
+                return xaRequest.toString();
             }
         };
 

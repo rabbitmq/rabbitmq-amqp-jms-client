@@ -27,6 +27,7 @@ import com.rabbitmq.client.jms.meta.JmsConsumerId;
 import com.rabbitmq.client.jms.meta.JmsResource;
 import com.rabbitmq.client.jms.meta.JmsSessionId;
 import com.rabbitmq.client.jms.meta.JmsTransactionInfo;
+import com.rabbitmq.client.jms.meta.JmsXaRequest;
 import com.rabbitmq.client.jms.provider.ProviderConstants.ACK_TYPE;
 
 /**
@@ -120,6 +121,11 @@ public class ProviderWrapper<E extends Provider> implements Provider, ProviderLi
     @Override
     public void rollback(JmsTransactionInfo transactionInfo, JmsTransactionInfo nextTransactionInfo, AsyncResult request) throws ProviderException {
         next.rollback(transactionInfo, nextTransactionInfo, request);
+    }
+
+    @Override
+    public void xa(JmsXaRequest xaRequest, AsyncResult request) throws ProviderException {
+        next.xa(xaRequest, request);
     }
 
     @Override

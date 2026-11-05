@@ -53,6 +53,9 @@ import com.rabbitmq.client.jms.JmsOperationTimedOutException;
 import com.rabbitmq.client.jms.JmsQueue;
 import com.rabbitmq.client.jms.JmsResourceNotFoundException;
 import com.rabbitmq.client.jms.JmsSendTimedOutException;
+import com.rabbitmq.client.jms.JmsSession;
+import com.rabbitmq.client.jms.JmsTransactionInDoubtException;
+import com.rabbitmq.client.jms.JmsTransactionListener;
 import com.rabbitmq.client.jms.policy.JmsDefaultPrefetchPolicy;
 import com.rabbitmq.client.jms.provider.amqp.AmqpSupport;
 import com.rabbitmq.client.jms.test.QpidJmsTestCase;
@@ -1723,15 +1726,8 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
 
             originalPeer.expectBegin();
 
-            final Binary txnId1 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-            final Binary txnId2 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
-
             if (dropAfterCoordinator) {
                 originalPeer.expectCoordinatorAttach();
-
-                // First expect an unsettled 'declare' transfer to the txn coordinator, and
-                // reply with a Declared disposition state containing the txnId.
-                originalPeer.expectDeclare(txnId1);
             }
 
             originalPeer.dropAfterLastHandler();
@@ -1743,17 +1739,30 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             finalPeer.expectBegin();
             finalPeer.expectBegin();
             finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId2);
-
-            // Expect an unsettled 'discharge' transfer to the txn coordinator containing the txnId,
-            // and reply with accepted and settled disposition to indicate the rollback succeeded.
-            finalPeer.expectDischarge(txnId2, true);
-            finalPeer.expectEnd();
-            finalPeer.expectClose();
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
 
             assertTrue(finalConnected.await(5, TimeUnit.SECONDS), "Should connect to final peer");
+
+            // The TX had no work before the failover, so it is not in doubt and can commit.
+            Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
+            TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
+            stateMatcher.withTxnId(equalTo(txnId));
+            stateMatcher.withOutcome(nullValue());
+            TransactionalState txState = new TransactionalState();
+            txState.setTxnId(txnId);
+            txState.setOutcome(new Accepted());
+
+            finalPeer.expectSenderAttach();
+            finalPeer.expectDeclare(txnId);
+            finalPeer.expectTransfer(new TransferPayloadCompositeMatcher(), stateMatcher, txState, true);
+            finalPeer.expectDischarge(txnId, false);
+            finalPeer.expectEnd();
+            finalPeer.expectClose();
+
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+            producer.send(session.createMessage());
+            session.commit();
 
             LOG.debug("About to close session following final peer connection.");
             session.close();
@@ -2645,29 +2654,40 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
 
             testPeer.expectBegin();
             testPeer.expectCoordinatorAttach();
+            testPeer.expectSenderAttach();
 
-            // First expect an unsettled 'declare' transfer to the txn coordinator, and
-            // reply with a Declared disposition state containing the txnId.
             Binary txnId = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
             testPeer.expectDeclare(txnId);
+
+            TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
+            stateMatcher.withTxnId(equalTo(txnId));
+            stateMatcher.withOutcome(nullValue());
+            TransactionalState txState = new TransactionalState();
+            txState.setTxnId(txnId);
+            txState.setOutcome(new Accepted());
+            testPeer.expectTransfer(new TransferPayloadCompositeMatcher(), stateMatcher, txState, true);
 
             // The session should send a commit but we don't respond, then drop the connection
             // and check that the commit is failed due to dropped connection.
             testPeer.expectDischargeButDoNotRespond(txnId, false);
-            testPeer.expectDeclareButDoNotRespond();
 
             testPeer.remotelyCloseConnection(true, ConnectionError.CONNECTION_FORCED, "Server is going away", 100);
 
             // --- Failover should handle the connection close ---------------//
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+            JmsTransactionListener listener = Mockito.mock(JmsTransactionListener.class);
+            ((JmsSession) session).getTransactionContext().setListener(listener);
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+            producer.send(session.createMessage());
 
             try {
                 session.commit();
                 fail("Commit should have thrown an exception");
-            } catch (JMSException jmsEx) {
-                LOG.debug("Commit threw: ", jmsEx);
+            } catch (JmsTransactionInDoubtException jmsEx) {
+                LOG.debug("Commit outcome unknown: ", jmsEx);
             }
+            Mockito.verify(listener, Mockito.never()).onTransactionRolledBack();
 
             assertTrue(failedConnection.await(6, TimeUnit.SECONDS), "Should reported failed");
 
@@ -3530,7 +3550,6 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             LOG.info("Final peer is at: {}", finalURI);
 
             final Binary txnId1 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-            final Binary txnId2 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
 
             // Expect the message which was sent under the current transaction. Check it carries
             // TransactionalState with the above txnId but has no outcome. Respond with a
@@ -3552,26 +3571,20 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectBegin();
             originalPeer.expectBegin();
             originalPeer.expectCoordinatorAttach();
-            // First expect an unsettled 'declare' transfer to the txn coordinator, and
-            // reply with a Declared disposition state containing the txnId.
-            originalPeer.expectDeclare(txnId1);
             originalPeer.expectSenderAttach();
+            originalPeer.expectDeclare(txnId1);
             originalPeer.expectTransfer(messageMatcher, stateMatcher, txState, true);
             originalPeer.dropAfterLastHandler(10);
 
             // --- Post Failover Expectations of sender --- //
+            // The recovered TX has no work on the final peer, so its rollback on commit
+            // and the rollback on close send nothing.
             finalPeer.expectSaslAnonymous();
             finalPeer.expectOpen();
             finalPeer.expectBegin();
             finalPeer.expectBegin();
             finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId2);
             finalPeer.expectSenderAttach();
-            // Attempt to commit the in-doubt TX will result in rollback and a new TX will be started.
-            finalPeer.expectDischarge(txnId2, true);
-            finalPeer.expectDeclare(txnId1);
-            // this rollback comes from the session being closed on connection close.
-            finalPeer.expectDischarge(txnId1, true);
             finalPeer.expectClose();
 
             final JmsConnection connection = establishAnonymousConnecton(originalPeer, finalPeer);
@@ -3662,7 +3675,6 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             LOG.info("Final peer is at: {}", finalURI);
 
             final Binary txnId1 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-            final Binary txnId2 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
 
             // Expect the message which was sent under the current transaction. Check it carries
             // TransactionalState with the above txnId but has no outcome. Respond with a
@@ -3681,8 +3693,8 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectBegin();
             originalPeer.expectBegin();
             originalPeer.expectCoordinatorAttach();
-            originalPeer.expectDeclare(txnId1);
             originalPeer.expectSenderAttach();
+            originalPeer.expectDeclare(txnId1);
             // Send is synchronous so we don't respond in order to stall the MessageProducer
             // in the send call to block recovery from initiating a new transaction which
             // will then cause the current transaction to become in-doubt and commit should
@@ -3697,12 +3709,10 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             finalPeer.expectBegin();
             finalPeer.expectSenderAttach();
             // Send will be blocked waiting to fire so it will not be filtered by the local
-            // transaction context in-doubt checks since there was no other work pending the
-            // transaction will be fully recovered so the fixed producer must ensure that no
-            // send occurs outside the transaction boundaries.
+            // transaction context in-doubt checks, so the fixed producer must ensure that no
+            // send occurs outside the transaction boundaries. The rollback of the in-doubt
+            // transaction starts the next one, which has no work.
             finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId2);
-            finalPeer.expectDischarge(txnId2, true);
             finalPeer.expectClose();
 
             final JmsConnection connection = establishAnonymousConnecton(originalPeer, finalPeer);
@@ -3799,8 +3809,8 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectBegin();
             originalPeer.expectBegin();
             originalPeer.expectCoordinatorAttach();
-            originalPeer.expectDeclare(txnId1);
             originalPeer.expectSenderAttach();
+            originalPeer.expectDeclare(txnId1);
             originalPeer.expectTransfer(messageMatcher, txn1StateMatcher, txn1Disposition, true);
             // Send is synchronous so we don't respond in order to stall the MessageProducer
             // in the send call to block recovery from initiating a new transaction which
@@ -3819,10 +3829,9 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             // by the local transaction context in-doubt checks, however since there
             // was pending transactional work the transaction will be rolled back
             // on commit and then a new transaction will be activated.  The producer
-            // will filter the held send as there is no active transaction.
+            // will filter the held send as there is no active transaction.  The new
+            // transaction has no work, so it is neither declared nor discharged.
             finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId2);
-            finalPeer.expectDischarge(txnId2, true);
             finalPeer.expectClose();
 
             final JmsConnection connection = establishAnonymousConnecton(originalPeer, finalPeer);
@@ -3901,7 +3910,6 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             LOG.info("Final peer is at: {}", finalURI);
 
             final Binary txnId1 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-            final Binary txnId2 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
             final DescribedType amqpValueNullContent = new AmqpValueDescribedType("myContent");
 
             // Expect the message which was sent under the current transaction. Check it carries
@@ -3921,8 +3929,8 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectBegin();
             originalPeer.expectBegin();
             originalPeer.expectCoordinatorAttach();
-            originalPeer.expectDeclare(txnId1);
             originalPeer.expectSenderAttach();
+            originalPeer.expectDeclare(txnId1);
             // Send is synchronous so we don't respond in order to stall the MessageProducer
             // in the send call to block recovery from initiating a new transaction which
             // will then cause the current transaction to become in-doubt and commit should
@@ -3944,8 +3952,6 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             finalPeer.expectReceiverAttach();
             finalPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, amqpValueNullContent);
             finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId2);
-            finalPeer.expectDischarge(txnId2, true);
             finalPeer.expectClose();
 
             final JmsConnection connection = establishAnonymousConnecton(originalPeer, finalPeer);
@@ -4008,7 +4014,6 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
     @Timeout(30)
     public void testReceiveAndSendInTransactionFailsCommitWhenConnectionDropsDuringSend() throws Exception {
         final Binary txnId1 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-        final Binary txnId2 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
 
         final TransferPayloadCompositeMatcher messageMatcher = new TransferPayloadCompositeMatcher();
         messageMatcher.setHeadersMatcher(new MessageHeaderSectionMatcher(true));
@@ -4043,10 +4048,10 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             originalPeer.expectBegin();
             originalPeer.expectBegin();
             originalPeer.expectCoordinatorAttach();
-            originalPeer.expectDeclare(txnId1);
             originalPeer.expectReceiverAttach();
             originalPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, new AmqpValueDescribedType("content"), 1);
-            originalPeer.expectDisposition(true, dispositionStateMatcher);
+            originalPeer.expectDeclare(txnId1);
+            originalPeer.expectDisposition(false, dispositionStateMatcher);
             originalPeer.expectSenderAttach();
             originalPeer.expectTransfer(messageMatcher, transfer1StateMatcher, false, false, null, false);
             originalPeer.dropAfterLastHandler();
@@ -4062,7 +4067,6 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             finalPeer.expectReceiverAttach();
             finalPeer.expectLinkFlow();
             finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId2);
 
             final JmsConnection connection = establishAnonymousConnecton(originalPeer, finalPeer);
             connection.setForceSyncSend(true);
@@ -4104,7 +4108,6 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             assertTrue(finalConnected.await(5, TimeUnit.SECONDS), "Should connect to final peer");
 
             finalPeer.waitForAllHandlersToComplete(1000);
-            finalPeer.expectDischarge(txnId2, true);
             finalPeer.expectClose();
 
             assertTrue(transactionRollback.await(5, TimeUnit.SECONDS), "Should have encounted a Transaction Rollback Error");
@@ -4131,60 +4134,48 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             LOG.info("Original peer is at: {}", originalURI);
             LOG.info("Final peer is at: {}", finalURI);
 
-            final Binary txnId1 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
             final Binary txnId2 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
             final DescribedType amqpValueNullContent = new AmqpValueDescribedType("myContent");
 
-            // Expect the message which was sent under the current transaction. Check it carries
-            // TransactionalState with the above txnId but has no outcome. Respond with a
-            // TransactionalState with Accepted outcome.
             TransferPayloadCompositeMatcher messageMatcher = new TransferPayloadCompositeMatcher();
             messageMatcher.setHeadersMatcher(new MessageHeaderSectionMatcher(true));
             messageMatcher.setMessageAnnotationsMatcher(new MessageAnnotationsSectionMatcher(true));
 
-            // The initial send should occur in transaction #1
-            TransactionalStateMatcher transferStateMatcher = new TransactionalStateMatcher();
-            transferStateMatcher.withTxnId(equalTo(txnId1));
-            transferStateMatcher.withOutcome(nullValue());
+            // The send after the failed transaction occurs in transaction #2
+            TransactionalStateMatcher transfer2StateMatcher = new TransactionalStateMatcher();
+            transfer2StateMatcher.withTxnId(equalTo(txnId2));
+            transfer2StateMatcher.withOutcome(nullValue());
 
-            // Accept the initial send after failover in transaction #1
-            TransactionalState transferTxnOutcome = new TransactionalState();
-            transferTxnOutcome.setTxnId(txnId1);
-            transferTxnOutcome.setOutcome(new Accepted());
+            TransactionalState transfer2TxnOutcome = new TransactionalState();
+            transfer2TxnOutcome.setTxnId(txnId2);
+            transfer2TxnOutcome.setOutcome(new Accepted());
 
-            // Receive call after failover should occur in transaction #1
-            TransactionalStateMatcher txnDispositionStateMatcher = new TransactionalStateMatcher();
-            txnDispositionStateMatcher.withTxnId(equalTo(txnId1));
-            txnDispositionStateMatcher.withOutcome(new AcceptedMatcher());
-
-            // Drop the connection after the declare giving a chance for recovery to attempt
-            // to rebuild while the context is still reacting to the failed begin.
+            // The first send declares the transaction, and the connection drops before
+            // the declare is answered, so the send is still pending and blocks recovery
+            // from starting a new transaction.
             originalPeer.expectSaslAnonymous();
             originalPeer.expectOpen();
             originalPeer.expectBegin();
             originalPeer.expectBegin();
             originalPeer.expectCoordinatorAttach();
+            originalPeer.expectSenderAttach();
             originalPeer.expectDeclareButDoNotRespond();
             originalPeer.dropAfterLastHandler();
 
             // --- Post Failover Expectations of sender --- //
+            // The replayed send and the acknowledgement are filtered as the transaction
+            // is in doubt, and the commit rolls it back and starts a new one.
             finalPeer.expectSaslAnonymous();
             finalPeer.expectOpen();
             finalPeer.expectBegin();
             finalPeer.expectBegin();
-            finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId1);
             finalPeer.expectSenderAttach();
-            // Send will be blocked waiting to fire so it will not be filtered
-            // by the local transaction context in-doubt checks, however since there
-            // was pending transactional work the transaction will be rolled back.
-            finalPeer.expectTransfer(messageMatcher, transferStateMatcher, transferTxnOutcome, true);
             finalPeer.expectReceiverAttach();
             finalPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, amqpValueNullContent);
-            finalPeer.expectDisposition(true, txnDispositionStateMatcher);
-            finalPeer.expectDischarge(txnId1, false);
+            finalPeer.expectCoordinatorAttach();
             finalPeer.expectDeclare(txnId2);
-            finalPeer.expectDischarge(txnId2, true);
+            finalPeer.expectTransfer(messageMatcher, transfer2StateMatcher, transfer2TxnOutcome, true);
+            finalPeer.expectDischarge(txnId2, false);
             finalPeer.expectClose();
 
             final JmsConnection connection = establishAnonymousConnecton(originalPeer, finalPeer);
@@ -4211,9 +4202,6 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             assertTrue(originalConnected.await(5, TimeUnit.SECONDS), "Should connect to original peer");
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
-
-            assertTrue(finalConnected.await(3, TimeUnit.SECONDS), "Should connect to final peer");
-
             Queue queue = session.createQueue("myQueue");
             MessageProducer producer = session.createProducer(queue);
             TextMessage message = session.createTextMessage("myMessage");
@@ -4221,17 +4209,22 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             try {
                 producer.send(message);
             } catch (JMSException jmsEx) {
-                fail("Should not have failed the async completion send.");
+                fail("Should not have failed the send.");
             }
+
+            assertTrue(finalConnected.await(3, TimeUnit.SECONDS), "Should connect to final peer");
 
             MessageConsumer consumer = session.createConsumer(queue);
             assertNotNull(consumer.receive(5000));
 
             try {
                 session.commit();
+                fail("Transaction should have been rolled back");
             } catch (TransactionRolledBackException txrbex) {
-                fail("Transaction should not have been rolled back");
             }
+
+            producer.send(message);
+            session.commit();
 
             connection.close();
 
@@ -4242,16 +4235,16 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
     @Test
     @Timeout(20)
     public void testTransactionCommitWithNoResponseRecoveredAsInDoubtAndPerformsNoWork() throws Exception {
-        doTestTransactionRetirementWithNoResponseRecoveredAsInDoubtAndCommitRollsBack(true);
+        doTestTransactionRetirementWithNoResponseRecoversSession(true);
     }
 
     @Test
     @Timeout(20)
     public void testTransactionRollbackWithNoResponseRecoveredAsInDoubtAndPerformsNoWork() throws Exception {
-        doTestTransactionRetirementWithNoResponseRecoveredAsInDoubtAndCommitRollsBack(false);
+        doTestTransactionRetirementWithNoResponseRecoversSession(false);
     }
 
-    private void doTestTransactionRetirementWithNoResponseRecoveredAsInDoubtAndCommitRollsBack(boolean commit) throws Exception {
+    private void doTestTransactionRetirementWithNoResponseRecoversSession(boolean commit) throws Exception {
         try (TestAmqpPeer originalPeer = new TestAmqpPeer();
              TestAmqpPeer finalPeer = new TestAmqpPeer();) {
 
@@ -4276,7 +4269,16 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             messageMatcher.setHeadersMatcher(new MessageHeaderSectionMatcher(true));
             messageMatcher.setMessageAnnotationsMatcher(new MessageAnnotationsSectionMatcher(true));
 
-            // The replayed send should occur in transaction #2
+            // The send before failover occurs in transaction #1
+            TransactionalStateMatcher transfer1StateMatcher = new TransactionalStateMatcher();
+            transfer1StateMatcher.withTxnId(equalTo(txnId1));
+            transfer1StateMatcher.withOutcome(nullValue());
+
+            TransactionalState transfer1TxnOutcome = new TransactionalState();
+            transfer1TxnOutcome.setTxnId(txnId1);
+            transfer1TxnOutcome.setOutcome(new Accepted());
+
+            // The send after failover should occur in transaction #2
             TransactionalStateMatcher transferStateMatcher = new TransactionalStateMatcher();
             transferStateMatcher.withTxnId(equalTo(txnId2));
             transferStateMatcher.withOutcome(nullValue());
@@ -4291,16 +4293,19 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             transferTxnOutcome.setTxnId(txnId2);
             transferTxnOutcome.setOutcome(new Accepted());
 
-            // Drop the connection after the declare giving a chance for recovery to attempt
-            // to rebuild while the context is still reacting to the failed begin.
+            // Drop the connection after the discharge giving a chance for recovery to attempt
+            // to rebuild while the context is still reacting to the failed discharge. The
+            // producer is closed before, so that recovery does not attach it again.
             originalPeer.expectSaslAnonymous();
             originalPeer.expectOpen();
             originalPeer.expectBegin();
             originalPeer.expectBegin();
             originalPeer.expectCoordinatorAttach();
+            originalPeer.expectSenderAttach();
             originalPeer.expectDeclare(txnId1);
+            originalPeer.expectTransfer(messageMatcher, transfer1StateMatcher, transfer1TxnOutcome, true);
+            originalPeer.expectDetach(true, true, true);
             originalPeer.expectDischargeButDoNotRespond(txnId1, !commit);
-            originalPeer.expectDeclareButDoNotRespond();
             originalPeer.dropAfterLastHandler();
 
             // --- Post Failover Expectations of sender --- //
@@ -4309,18 +4314,14 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             finalPeer.expectBegin();
             finalPeer.expectBegin();
             finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId2);
             finalPeer.expectSenderAttach();
-            // Send will be blocked waiting to fire so it will not be filtered
-            // by the local transaction context in-doubt checks, however since there
-            // was pending transactional work the transaction will be rolled back.
+            finalPeer.expectDeclare(txnId2);
             finalPeer.expectTransfer(messageMatcher, transferStateMatcher, transferTxnOutcome, true);
             finalPeer.expectReceiverAttach();
             finalPeer.expectLinkFlowRespondWithTransfer(null, null, null, null, amqpValueNullContent);
-            finalPeer.expectDisposition(true, txnDispositionStateMatcher);
+            finalPeer.expectDisposition(false, txnDispositionStateMatcher);
             finalPeer.expectDischarge(txnId2, false);
-            finalPeer.expectDeclare(txnId1);
-            finalPeer.expectDischarge(txnId1, true);
+            finalPeer.expectDisposition(true, txnDispositionStateMatcher);
             finalPeer.expectClose();
 
             final JmsConnection connection = establishAnonymousConnecton(originalPeer, finalPeer);
@@ -4346,12 +4347,17 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             assertTrue(originalConnected.await(5, TimeUnit.SECONDS), "Should connect to original peer");
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+            Queue queue = session.createQueue("myQueue");
+            MessageProducer producer = session.createProducer(queue);
+            TextMessage message = session.createTextMessage("myMessage");
+            producer.send(message);
+            producer.close();
 
             if (commit) {
                 try {
                     session.commit();
                     fail("Should have failed on the commit when connection dropped");
-                } catch (TransactionRolledBackException txnRbEx) {
+                } catch (JmsTransactionInDoubtException txnInDoubtEx) {
                     // Expected
                 }
             } else {
@@ -4364,9 +4370,7 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
 
             assertTrue(finalConnected.await(3, TimeUnit.SECONDS), "Should connect to final peer");
 
-            Queue queue = session.createQueue("myQueue");
-            MessageProducer producer = session.createProducer(queue);
-            TextMessage message = session.createTextMessage("myMessage");
+            producer = session.createProducer(queue);
 
             try {
                 producer.send(message);
@@ -4406,32 +4410,37 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             LOG.info("Final peer is at: {}", finalURI);
 
             final Binary txnId1 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-            final Binary txnId2 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
 
-            // Drop the connection after the declare giving a chance for recovery to attempt
-            // to rebuild while the context is still reacting to the failed begin.
+            TransactionalStateMatcher transferStateMatcher = new TransactionalStateMatcher();
+            transferStateMatcher.withTxnId(equalTo(txnId1));
+            transferStateMatcher.withOutcome(nullValue());
+
+            TransactionalState transferTxnOutcome = new TransactionalState();
+            transferTxnOutcome.setTxnId(txnId1);
+            transferTxnOutcome.setOutcome(new Accepted());
+
+            // Drop the connection after the discharge giving a chance for recovery to attempt
+            // to rebuild while the context is still reacting to the failed commit.
             originalPeer.expectSaslAnonymous();
             originalPeer.expectOpen();
             originalPeer.expectBegin();
             originalPeer.expectBegin();
             originalPeer.expectCoordinatorAttach();
-            originalPeer.expectDeclare(txnId1);
             originalPeer.expectSenderAttach();
+            originalPeer.expectDeclare(txnId1);
+            originalPeer.expectTransfer(new TransferPayloadCompositeMatcher(), transferStateMatcher, transferTxnOutcome, true);
             originalPeer.expectDischargeButDoNotRespond(txnId1, false);
-            originalPeer.expectDeclareButDoNotRespond();
             originalPeer.dropAfterLastHandler();
 
             // --- Post Failover Expectations of sender --- //
+            // The skipped send is the only work of the recovered transaction, so its
+            // rollback sends nothing.
             finalPeer.expectSaslAnonymous();
             finalPeer.expectOpen();
             finalPeer.expectBegin();
             finalPeer.expectBegin();
             finalPeer.expectCoordinatorAttach();
-            finalPeer.expectDeclare(txnId2);
             finalPeer.expectSenderAttach();
-            finalPeer.expectDischarge(txnId2, true);
-            finalPeer.expectDeclare(txnId1);
-            finalPeer.expectDischarge(txnId1, true);
             finalPeer.expectClose();
 
             // Need to allow time for the asynchronous send to fire after connection drop in order to ensure
@@ -4462,11 +4471,12 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             Queue queue = session.createQueue("myQueue");
             MessageProducer producer = session.createProducer(queue);
             TextMessage message = session.createTextMessage("myMessage");
+            producer.send(message);
 
             try {
                 session.commit();
                 fail("Should have failed on the commit when connection dropped");
-            } catch (TransactionRolledBackException txnRbEx) {
+            } catch (JmsTransactionInDoubtException txnInDoubtEx) {
                 // Expected
             }
 
@@ -4926,15 +4936,23 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             connection.start();
 
             Binary txnId1 = new Binary(new byte[]{ (byte) 5, (byte) 6, (byte) 7, (byte) 8});
-            Binary txnId2 = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
 
+            TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
+            stateMatcher.withTxnId(equalTo(txnId1));
+            stateMatcher.withOutcome(nullValue());
+            TransactionalState txState = new TransactionalState();
+            txState.setTxnId(txnId1);
+            txState.setOutcome(new Accepted());
+
+            testPeer.expectSenderAttach();
             testPeer.expectDeclare(txnId1);
-            testPeer.remotelyCloseLastCoordinatorLinkOnDischarge(txnId1, false, true, txnId2);
+            testPeer.expectTransfer(new TransferPayloadCompositeMatcher(), stateMatcher, txState, true);
+            testPeer.remotelyCloseLastCoordinatorLinkOnDischarge(txnId1, false);
             testPeer.expectCoordinatorAttach();
-            testPeer.expectDeclare(txnId2);
-            testPeer.expectDischarge(txnId2, true);
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+            producer.send(session.createMessage());
 
             try {
                 session.commit();
@@ -4952,7 +4970,7 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
 
     @Test
     @Timeout(20)
-    public void testPassthroughOfSessionCreateFailsOnDeclareTimeout() throws Exception {
+    public void testPassthroughOfDeclareTimeoutFailsCommit() throws Exception {
         try (TestAmqpPeer testPeer = new TestAmqpPeer();) {
 
             final String testPeerURI = createPeerURI(testPeer);
@@ -4963,21 +4981,22 @@ public class FailoverIntegrationTest extends QpidJmsTestCase {
             testPeer.expectBegin();
             testPeer.expectBegin();
             testPeer.expectCoordinatorAttach();
+            testPeer.expectSenderAttach();
             testPeer.expectDeclareButDoNotRespond();
-            // Expect the AMQP session to be closed due to the JMS session creation failure.
-            testPeer.expectEnd();
 
             JmsConnection connection = establishAnonymousConnecton(testPeer);
             connection.setRequestTimeout(500);
             connection.start();
 
+            Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
+            MessageProducer producer = session.createProducer(session.createQueue("myQueue"));
+            producer.send(session.createMessage());
+
             try {
-                connection.createSession(true, Session.SESSION_TRANSACTED);
-                fail("Should have timed out waiting for declare.");
-            } catch (JmsOperationTimedOutException jmsEx) {
-            } catch (Throwable error) {
-                fail("Should have caught an timed out exception:");
-                LOG.error("Caught -> ", error);
+                session.commit();
+                fail("Should have failed as the declare timed out.");
+            } catch (TransactionRolledBackException ex) {
+                LOG.info("Caught expected TransactionRolledBackException", ex);
             }
 
             testPeer.expectClose();

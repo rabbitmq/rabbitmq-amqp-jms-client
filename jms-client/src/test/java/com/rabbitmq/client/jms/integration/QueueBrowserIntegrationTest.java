@@ -17,7 +17,6 @@
 package com.rabbitmq.client.jms.integration;
 
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,12 +35,7 @@ import jakarta.jms.Session;
 import com.rabbitmq.client.jms.policy.JmsDefaultPrefetchPolicy;
 import com.rabbitmq.client.jms.test.QpidJmsTestCase;
 import com.rabbitmq.client.jms.test.testpeer.TestAmqpPeer;
-import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declare;
-import com.rabbitmq.client.jms.test.testpeer.describedtypes.Declared;
 import com.rabbitmq.client.jms.test.testpeer.describedtypes.sections.AmqpValueDescribedType;
-import com.rabbitmq.client.jms.test.testpeer.matchers.sections.TransferPayloadCompositeMatcher;
-import com.rabbitmq.client.jms.test.testpeer.matchers.types.EncodedAmqpValueMatcher;
-import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.DescribedType;
 import org.apache.qpid.proton.amqp.UnsignedInteger;
 import org.hamcrest.Matchers;
@@ -283,13 +277,6 @@ public class QueueBrowserIntegrationTest extends QpidJmsTestCase {
 
             testPeer.expectBegin();
             testPeer.expectCoordinatorAttach();
-
-            // First expect an unsettled 'declare' transfer to the txn coordinator, and
-            // reply with a declared disposition state containing the txnId.
-            Binary txnId = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-            TransferPayloadCompositeMatcher declareMatcher = new TransferPayloadCompositeMatcher();
-            declareMatcher.setMessageContentMatcher(new EncodedAmqpValueMatcher(new Declare()));
-            testPeer.expectTransfer(declareMatcher, nullValue(), new Declared().setTxnId(txnId), true);
 
             Session session = connection.createSession(true, Session.SESSION_TRANSACTED);
             Queue queue = session.createQueue("myQueue");

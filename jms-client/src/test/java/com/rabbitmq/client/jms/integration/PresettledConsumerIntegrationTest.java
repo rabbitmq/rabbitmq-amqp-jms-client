@@ -245,11 +245,7 @@ public class PresettledConsumerIntegrationTest extends QpidJmsTestCase {
                 txCoordinatorMatcher.withCapabilities(arrayContaining(TxnCapability.LOCAL_TXN));
                 testPeer.expectSenderAttach(txCoordinatorMatcher, false, false);
 
-                // First expect an unsettled 'declare' transfer to the txn coordinator, and
-                // reply with a declared disposition state containing the txnId.
                 txnId = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-                testPeer.expectDeclare(txnId);
-
                 session = connection.createSession(true, Session.SESSION_TRANSACTED);
             } else {
                 // Use client ack so the receipt of the settled disposition is controllable.
@@ -287,20 +283,21 @@ public class PresettledConsumerIntegrationTest extends QpidJmsTestCase {
                 if (!transacted) {
                     testPeer.expectDispositionThatIsAcceptedAndSettled();
                 } else {
-                    // Then expect an *settled* TransactionalState disposition for each message
+                    // Then expect an *unsettled* TransactionalState disposition for each message
                     // once received by the consumer
+                    testPeer.expectDeclare(txnId);
                     TransactionalStateMatcher stateMatcher = new TransactionalStateMatcher();
                     stateMatcher.withTxnId(equalTo(txnId));
                     stateMatcher.withOutcome(new AcceptedMatcher());
 
-                    testPeer.expectDisposition(true, stateMatcher);
+                    testPeer.expectDisposition(false, stateMatcher);
                 }
             }
 
             MessageConsumer consumer = session.createConsumer(destination);
             assertNotNull(consumer.receive(3000));
 
-            if (transacted) {
+            if (transacted && !transferSettled) {
                 testPeer.expectDischarge(txnId, true);
             }
 

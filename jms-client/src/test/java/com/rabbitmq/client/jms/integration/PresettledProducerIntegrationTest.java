@@ -382,11 +382,7 @@ public class PresettledProducerIntegrationTest extends QpidJmsTestCase {
                 txCoordinatorMatcher.withCapabilities(arrayContaining(TxnCapability.LOCAL_TXN));
                 testPeer.expectSenderAttach(txCoordinatorMatcher, false, false);
 
-                // First expect an unsettled 'declare' transfer to the txn coordinator, and
-                // reply with a declared disposition state containing the txnId.
                 txnId = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-                testPeer.expectDeclare(txnId);
-
                 session = connection.createSession(true, Session.SESSION_TRANSACTED);
             } else {
                 session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
@@ -442,6 +438,10 @@ public class PresettledProducerIntegrationTest extends QpidJmsTestCase {
                 TransactionalState txState = new TransactionalState();
                 txState.setTxnId(txnId);
                 txState.setOutcome(new Accepted());
+            }
+
+            if (transacted) {
+                testPeer.expectDeclare(txnId);
             }
 
             if (transferSettled) {
@@ -555,11 +555,7 @@ public class PresettledProducerIntegrationTest extends QpidJmsTestCase {
                 txCoordinatorMatcher.withCapabilities(arrayContaining(TxnCapability.LOCAL_TXN));
                 testPeer.expectSenderAttach(txCoordinatorMatcher, false, false);
 
-                // First expect an unsettled 'declare' transfer to the txn coordinator, and
-                // reply with a declared disposition state containing the txnId.
                 txnId = new Binary(new byte[]{ (byte) 1, (byte) 2, (byte) 3, (byte) 4});
-                testPeer.expectDeclare(txnId);
-
                 session = connection.createSession(true, Session.SESSION_TRANSACTED);
             } else {
                 session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
@@ -616,6 +612,10 @@ public class PresettledProducerIntegrationTest extends QpidJmsTestCase {
                 TransactionalState txState = new TransactionalState();
                 txState.setTxnId(txnId);
                 txState.setOutcome(new Accepted());
+            }
+
+            if (transacted) {
+                testPeer.expectDeclare(txnId);
             }
 
             if (transferSettled) {
